@@ -93,6 +93,14 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	// Return error if any operations failed
 	if result.HasFailures() {
+		// Print details for each failure
+		for _, f := range result.FailedResults() {
+			if f.Error != nil {
+				fmt.Printf("  %s: %v\n", f.RepoName, f.Error)
+			} else {
+				fmt.Printf("  %s: unknown error\n", f.RepoName)
+			}
+		}
 		return fmt.Errorf("%d of %d repositories failed to sync", result.FailureCount, result.TotalRepos)
 	}
 
