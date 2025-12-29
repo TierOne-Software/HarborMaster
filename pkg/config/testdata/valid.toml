@@ -1,0 +1,45 @@
+[general]
+work_dir = "/tmp/workspace"
+cache_dir = "/tmp/cache"
+timeout = "5m"
+default_branch = "develop"
+recurse_submodule = false
+
+[http]
+user_agent = "TestAgent/1.0"
+retry_attempts = 5
+retry_delay = "3s"
+
+[git]
+shallow_clone = false
+clone_depth = 10
+
+[[repository]]
+name = "repo1"
+url = "https://github.com/test/repo1.git"
+type = "git"
+branch = "main"
+path = "repos/repo1"
+tags = ["backend", "core"]
+
+[[repository]]
+name = "repo2"
+url = "https://github.com/test/repo2.git"
+type = "git"
+tag = "v1.0.0"
+path = "repos/repo2"
+
+[[repository]]
+name = "config-file"
+url = "https://example.com/config.json"
+type = "http"
+path = "config/app.json"
+
+[[project]]
+name = "core"
+repositories = ["repo1", "repo2"]
+tags = ["main-project"]
+
+[[project]]
+name = "all"
+repositories = ["repo1", "repo2", "config-file"]
