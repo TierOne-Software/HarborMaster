@@ -99,7 +99,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	cfg, err := parseConfigFile(&cf)
+	cfg, err := parseConfigFile(&cf, path)
 	if err != nil {
 		return nil, err
 	}
@@ -298,8 +298,18 @@ func (c *Config) RemoveRepoFromProject(projectName, repoName string) error {
 	return fmt.Errorf("project not found: %s", projectName)
 }
 
-func parseConfigFile(cf *ConfigFile) (*Config, error) {
+func parseConfigFile(cf *ConfigFile, configPath string) (*Config, error) {
 	cfg := &Config{}
+
+	// Get the directory containing the config file for resolving relative paths
+	configDir := filepath.Dir(configPath)
+	if !filepath.IsAbs(configDir) {
+		absConfigDir, err := filepath.Abs(configDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve config directory: %w", err)
+		}
+		configDir = absConfigDir
+	}
 
 	// Parse general config
 	if cf.General.WorkDir != "" {
@@ -307,10 +317,14 @@ func parseConfigFile(cf *ConfigFile) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand work_dir: %w", err)
 		}
-		cfg.General.WorkDir = workDir
+		// If work_dir is relative, resolve it against the config file's directory
+		if !filepath.IsAbs(workDir) {
+			workDir = filepath.Join(configDir, workDir)
+		}
+		cfg.General.WorkDir = filepath.Clean(workDir)
 	} else {
-		cwd, _ := os.Getwd()
-		cfg.General.WorkDir = cwd
+		// Default to the config file's directory
+		cfg.General.WorkDir = configDir
 	}
 
 	if cf.General.CacheDir != "" {
@@ -318,7 +332,11 @@ func parseConfigFile(cf *ConfigFile) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand cache_dir: %w", err)
 		}
-		cfg.General.CacheDir = cacheDir
+		// If cache_dir is relative, resolve it against the config file's directory
+		if !filepath.IsAbs(cacheDir) {
+			cacheDir = filepath.Join(configDir, cacheDir)
+		}
+		cfg.General.CacheDir = filepath.Clean(cacheDir)
 	}
 
 	if cf.General.Timeout != "" {
