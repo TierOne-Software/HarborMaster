@@ -41,8 +41,10 @@ type Config struct {
 
 // GeneralConfig holds general settings.
 type GeneralConfig struct {
-	WorkDir          string
+	WorkDir          string // Expanded absolute path for use at runtime
+	WorkDirOriginal  string // Original value from config (for saving back)
 	CacheDir         string
+	CacheDirOriginal string // Original value from config (for saving back)
 	Timeout          time.Duration
 	DefaultBranch    string
 	RecurseSubmodule bool
@@ -312,6 +314,8 @@ func parseConfigFile(cf *ConfigFile, configPath string) (*Config, error) {
 	}
 
 	// Parse general config
+	// Store original value for saving back to file
+	cfg.General.WorkDirOriginal = cf.General.WorkDir
 	if cf.General.WorkDir != "" {
 		workDir, err := ExpandPath(cf.General.WorkDir)
 		if err != nil {
@@ -325,8 +329,11 @@ func parseConfigFile(cf *ConfigFile, configPath string) (*Config, error) {
 	} else {
 		// Default to the config file's directory
 		cfg.General.WorkDir = configDir
+		cfg.General.WorkDirOriginal = "./"
 	}
 
+	// Store original value for saving back to file
+	cfg.General.CacheDirOriginal = cf.General.CacheDir
 	if cf.General.CacheDir != "" {
 		cacheDir, err := ExpandPath(cf.General.CacheDir)
 		if err != nil {
@@ -426,9 +433,9 @@ func parseConfigFile(cf *ConfigFile, configPath string) (*Config, error) {
 func toConfigFile(c *Config) *ConfigFile {
 	cf := &ConfigFile{}
 
-	// General config
-	cf.General.WorkDir = c.General.WorkDir
-	cf.General.CacheDir = c.General.CacheDir
+	// General config - use original values to preserve relative paths
+	cf.General.WorkDir = c.General.WorkDirOriginal
+	cf.General.CacheDir = c.General.CacheDirOriginal
 	cf.General.Timeout = c.General.Timeout.String()
 	cf.General.DefaultBranch = c.General.DefaultBranch
 	cf.General.RecurseSubmodule = &c.General.RecurseSubmodule
@@ -474,6 +481,7 @@ func NewDefaultConfig() *Config {
 	return &Config{
 		General: GeneralConfig{
 			WorkDir:          cwd,
+			WorkDirOriginal:  "./", // Use relative path for portability
 			Timeout:          DefaultTimeout,
 			DefaultBranch:    DefaultBranch,
 			RecurseSubmodule: true,
