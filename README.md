@@ -5,7 +5,7 @@ A command-line tool for managing and synchronizing multiple repositories.
 ## Installation
 
 ```bash
-go install github.com/tierone/harbormaster/cmd/harbormaster@latest
+go install github.com/TierOne-Software/HarborMaster/cmd/harbormaster@latest
 ```
 
 ## Quick Start
