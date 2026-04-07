@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/tierone/harbormaster/pkg/config"
 	"github.com/tierone/harbormaster/pkg/lockfile"
+	"github.com/tierone/harbormaster/pkg/work"
 )
 
 var (
@@ -19,6 +20,9 @@ var (
 	// Loaded config and lockfile
 	cfg *config.Config
 	lf  *lockfile.LockFile
+
+	// Active work session (nil if none)
+	ws *work.WorkSession
 )
 
 var rootCmd = &cobra.Command{
@@ -69,6 +73,15 @@ synchronize your repositories.`,
 			return fmt.Errorf("failed to load lock file: %w", err)
 		}
 
+		// Load work session if one exists
+		workPath := getWorkFilePath()
+		if work.FileExists(workPath) {
+			ws, err = work.Load(workPath)
+			if err != nil {
+				return fmt.Errorf("failed to load work session: %w", err)
+			}
+		}
+
 		return nil
 	},
 }
@@ -102,6 +115,26 @@ func saveLockFile() error {
 		return nil
 	}
 	return lf.Save(getLockFilePath())
+}
+
+func getWorkFilePath() string {
+	dir := getConfigDir()
+	return dir + "/" + work.WorkFileName
+}
+
+func saveWorkFile() error {
+	if ws == nil {
+		return nil
+	}
+	return ws.Save(getWorkFilePath())
+}
+
+func deleteWorkFile() error {
+	path := getWorkFilePath()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+	return os.Remove(path)
 }
 
 func Execute() error {

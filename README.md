@@ -153,6 +153,65 @@ hm project remove-repo <project> <repo>    # Remove repo from project
 |------|-------------|
 | `-f, --force` | Don't prompt for confirmation |
 
+### work
+
+Manage coordinated multi-repository work sessions. Create a shared branch across
+selected repositories, then commit, push, and create pull requests across all of
+them in a single command.
+
+```bash
+hm work start <branch> [repository...] [flags]   # Start a work session
+hm work end [flags]                               # End session, restore branches
+hm work add <repository>                          # Add repo to session
+hm work remove <repository>                       # Remove repo from session
+hm work status [flags]                            # Show session status
+hm work commit [repository...] [flags]            # Commit across repos
+hm work push [repository...] [flags]              # Push across repos
+hm work pr [repository...] [flags]                # Create PRs across repos
+```
+
+**work start flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-p, --project` | Include repositories from a project |
+| `-t, --tag` | Include repositories with a tag |
+
+**work end flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-f, --force` | End even with uncommitted changes |
+
+**work status flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Output as JSON |
+
+**work commit flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-m, --message` | Commit message (required) |
+| `--all` | Commit in all session repositories |
+
+**work push flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--all` | Push all session repositories |
+
+**work pr flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--title` | Pull request title (defaults to branch name) |
+| `--body` | Pull request body |
+| `--all` | Create PRs for all session repositories |
+
+> **Note:** `hm work pr` requires the [GitHub CLI](https://cli.github.com/) (`gh`) to be installed and authenticated.
+
 ## Global Flags
 
 | Flag | Description |
@@ -234,4 +293,20 @@ hm project add backend --repos=api,database --tags=production
 
 # Get status as JSON
 hm status --json
+
+# Start a work session across a project
+hm work start feature/auth -p backend
+
+# Check changes across all repos in the session
+hm work status
+
+# Commit and push all repos at once
+hm work commit --all -m "add auth middleware"
+hm work push --all
+
+# Create PRs for all repos
+hm work pr --all --title "Add auth middleware"
+
+# End the session
+hm work end
 ```

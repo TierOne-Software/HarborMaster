@@ -151,6 +151,11 @@ func (m *RepositoryManager) getRepoPath(repo *config.Repository) string {
 	return filepath.Join(m.workDir, repo.GetEffectivePath())
 }
 
+// GetRepoPath returns the full path for a repository.
+func (m *RepositoryManager) GetRepoPath(repo *config.Repository) string {
+	return m.getRepoPath(repo)
+}
+
 // syncRepository syncs a single repository.
 func (m *RepositoryManager) syncRepository(repo *config.Repository) types.OperationResult {
 	startTime := time.Now()
