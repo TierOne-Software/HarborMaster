@@ -249,3 +249,200 @@ func TestHTTPDownloader_DownloadWithProgress(t *testing.T) {
 		t.Fatalf("file not created: %v", err)
 	}
 }
+
+func TestHTTPDownloader_Download_404_NoRetry(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "test.txt")
+
+	dl := NewHTTPDownloader(Options{
+		Timeout:       30 * time.Second,
+		RetryAttempts: 3,
+		RetryDelay:    1 * time.Millisecond,
+	})
+
+	_, err := dl.Download(server.URL, destPath)
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected 404 in error, got: %v", err)
+	}
+	if attempts != 1 {
+		t.Errorf("404 must not be retried: expected 1 attempt, got %d", attempts)
+	}
+}
+
+func TestHTTPDownloader_Download_AtomicOnFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "test.txt")
+
+	// A previous good download exists.
+	const goodContent = "previous good content"
+	if err := os.WriteFile(destPath, []byte(goodContent), 0644); err != nil {
+		t.Fatalf("failed to write existing file: %v", err)
+	}
+
+	t.Run("http error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer server.Close()
+
+		dl := NewHTTPDownloader(Options{Timeout: 30 * time.Second})
+		if _, err := dl.Download(server.URL, destPath); err == nil {
+			t.Fatal("expected error for 500")
+		}
+
+		data, err := os.ReadFile(destPath)
+		if err != nil {
+			t.Fatalf("previous good file was destroyed: %v", err)
+		}
+		if string(data) != goodContent {
+			t.Errorf("previous good file was modified: %q", string(data))
+		}
+	})
+
+	t.Run("interrupted body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Announce more bytes than are sent, then cut the connection.
+			w.Header().Set("Content-Length", "1000")
+			_, _ = w.Write([]byte("partial"))
+		}))
+		defer server.Close()
+
+		dl := NewHTTPDownloader(Options{Timeout: 30 * time.Second})
+		if _, err := dl.Download(server.URL, destPath); err == nil {
+			t.Fatal("expected error for truncated body")
+		}
+
+		data, err := os.ReadFile(destPath)
+		if err != nil {
+			t.Fatalf("previous good file was destroyed: %v", err)
+		}
+		if string(data) != goodContent {
+			t.Errorf("previous good file was modified: %q", string(data))
+		}
+	})
+
+	// No temporary files may be left behind.
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to read dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("leftover temporary file: %s", e.Name())
+		}
+	}
+}
+
+func TestHTTPDownloader_Update_FreshInstance(t *testing.T) {
+	content := "updated content"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(content))
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "test.txt")
+
+	// A fresh instance (no prior Download call) must be able to Update
+	// using the configured source URL.
+	dl := NewHTTPDownloader(Options{
+		SourceURL: server.URL,
+		Timeout:   30 * time.Second,
+	})
+
+	hash, err := dl.Update(destPath)
+	if err != nil {
+		t.Fatalf("Update on fresh instance failed: %v", err)
+	}
+	if hash == "" {
+		t.Error("expected hash to be returned")
+	}
+
+	data, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatalf("file not created: %v", err)
+	}
+	if string(data) != content {
+		t.Errorf("expected content %q, got %q", content, string(data))
+	}
+}
+
+func TestHTTPDownloader_Update_NoSource(t *testing.T) {
+	dl := NewHTTPDownloader(Options{Timeout: 30 * time.Second})
+
+	if _, err := dl.Update(filepath.Join(t.TempDir(), "x")); err == nil {
+		t.Error("expected error when no source URL is known")
+	}
+
+	if _, _, err := dl.UpdateWithProgress(filepath.Join(t.TempDir(), "x")); err == nil {
+		t.Error("expected error when no source URL is known")
+	}
+}
+
+func TestHTTPDownloader_RetrySleepCancellable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "test.txt")
+
+	// With a huge retry delay, the overall timeout must cut the sleep short
+	// instead of blocking for RetryAttempts * RetryDelay.
+	dl := NewHTTPDownloader(Options{
+		Timeout:       200 * time.Millisecond,
+		RetryAttempts: 100,
+		RetryDelay:    1 * time.Hour,
+	})
+
+	start := time.Now()
+	_, err := dl.Download(server.URL, destPath)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected download to fail")
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("retry sleep was not cancellable: took %s", elapsed)
+	}
+}
+
+func TestHTTPDownloader_DownloadWithProgress_Failure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	destPath := filepath.Join(tmpDir, "test.txt")
+
+	dl := NewHTTPDownloader(Options{Timeout: 30 * time.Second})
+
+	_, progressCh, err := dl.DownloadWithProgress(server.URL, destPath)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var lastUpdate types.ProgressUpdate
+	for update := range progressCh {
+		lastUpdate = update
+	}
+
+	if lastUpdate.Phase != types.PhaseFailed {
+		t.Errorf("expected final phase %s, got %s", types.PhaseFailed, lastUpdate.Phase)
+	}
+	if lastUpdate.Error == nil {
+		t.Error("expected terminal update to carry the error")
+	}
+}

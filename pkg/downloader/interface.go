@@ -34,6 +34,11 @@ type Downloader interface {
 
 // Options configures downloader behavior.
 type Options struct {
+	// SourceURL is the canonical source location for the dependency. It is
+	// used by Update when no prior Download recorded a source (e.g. a fresh
+	// downloader instance operating on an existing destination).
+	SourceURL string
+
 	// Git-specific options
 	Branch     string
 	Tag        string

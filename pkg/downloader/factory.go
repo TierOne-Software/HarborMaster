@@ -22,6 +22,7 @@ func New(repoType config.RepositoryType, opts Options) (Downloader, error) {
 // NewFromRepository creates a Downloader from a repository configuration.
 func NewFromRepository(repo *config.Repository, cfg *config.Config) (Downloader, error) {
 	opts := Options{
+		SourceURL:     repo.URL,
 		Branch:        repo.Branch,
 		Tag:           repo.Tag,
 		Commit:        repo.Commit,
@@ -39,11 +40,34 @@ func NewFromRepository(repo *config.Repository, cfg *config.Config) (Downloader,
 
 // DetectType attempts to detect the repository type from the URL.
 func DetectType(url string) config.RepositoryType {
-	// Git URLs
+	// Unambiguous git URL schemes.
 	if strings.HasPrefix(url, "git@") ||
 		strings.HasPrefix(url, "git://") ||
-		strings.HasSuffix(url, ".git") ||
-		strings.Contains(url, "github.com") ||
+		strings.HasPrefix(url, "ssh://") {
+		return config.RepoTypeGit
+	}
+
+	// Strip query string and fragment before inspecting the path, so
+	// "repo.git?token=x" is still recognized as git and "file.tar.gz?sig=y"
+	// as a plain download.
+	path := url
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+
+	if strings.HasSuffix(path, ".git") {
+		return config.RepoTypeGit
+	}
+
+	// Release assets hosted on git forges (e.g. GitHub's
+	// .../releases/download/<tag>/<asset>) are plain file downloads, not
+	// repositories.
+	if strings.Contains(path, "/releases/download/") {
+		return config.RepoTypeHTTP
+	}
+
+	// Known git hosting domains.
+	if strings.Contains(url, "github.com") ||
 		strings.Contains(url, "gitlab.com") ||
 		strings.Contains(url, "bitbucket.org") {
 		return config.RepoTypeGit
