@@ -2,7 +2,10 @@ package ui
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/progress"
@@ -25,6 +28,34 @@ type operationState struct {
 
 func (o *operationState) isComplete() bool {
 	return o.phase == types.PhaseComplete || o.phase == types.PhaseFailed
+}
+
+// failed reports whether the operation ended in failure. An operation counts
+// as failed if it reached the failed phase or carries an error, regardless of
+// which of the two was set.
+func (o *operationState) failed() bool {
+	return o.phase == types.PhaseFailed || o.err != nil
+}
+
+// succeeded reports whether the operation completed successfully.
+func (o *operationState) succeeded() bool {
+	return o.phase == types.PhaseComplete && o.err == nil
+}
+
+// summarizeOperations is the single counting predicate shared by the
+// interactive summary (Model.renderSummary) and the simple output
+// (SimpleOutput.Complete). A repository counts as a success only if it
+// reached the complete phase without an error; everything else (failed
+// phase, error, or never finished) counts as a failure.
+func summarizeOperations(ops map[string]*operationState) (success, failed int) {
+	for _, op := range ops {
+		if op.succeeded() {
+			success++
+		} else {
+			failed++
+		}
+	}
+	return success, failed
 }
 
 func (o *operationState) duration() time.Duration {
@@ -179,9 +210,16 @@ func (m *Model) renderOperation(op *operationState) string {
 
 	// Phase or progress bar
 	if op.isComplete() {
-		if op.err != nil {
+		switch {
+		case op.err != nil:
 			b.WriteString(ErrorStyle.Render(op.err.Error()))
-		} else {
+		case op.failed():
+			msg := op.message
+			if msg == "" {
+				msg = "failed"
+			}
+			b.WriteString(ErrorStyle.Render(msg))
+		default:
 			b.WriteString(SuccessStyle.Render(op.message))
 		}
 		// Duration
@@ -206,7 +244,7 @@ func (m *Model) renderOperation(op *operationState) string {
 
 func (m *Model) getSymbol(op *operationState) string {
 	if op.isComplete() {
-		if op.err != nil {
+		if op.failed() {
 			return SymbolError
 		}
 		return SymbolSuccess
@@ -215,14 +253,7 @@ func (m *Model) getSymbol(op *operationState) string {
 }
 
 func (m *Model) renderSummary() string {
-	var success, failed int
-	for _, op := range m.operations {
-		if op.err != nil {
-			failed++
-		} else if op.phase == types.PhaseComplete {
-			success++
-		}
-	}
+	success, failed := summarizeOperations(m.operations)
 
 	var b strings.Builder
 	b.WriteString("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
@@ -271,20 +302,32 @@ func Run(m Model) (Model, error) {
 	return finalModel.(Model), nil
 }
 
-// Simple progress output for non-interactive mode.
+// SimpleOutput is a simple progress output for non-interactive mode.
+// It is safe for concurrent use.
 type SimpleOutput struct {
+	mu         sync.Mutex
+	w          io.Writer
 	operations map[string]*operationState
 }
 
-// NewSimpleOutput creates a simple non-interactive output.
+// NewSimpleOutput creates a simple non-interactive output writing to stdout.
 func NewSimpleOutput() *SimpleOutput {
+	return NewSimpleOutputTo(os.Stdout)
+}
+
+// NewSimpleOutputTo creates a simple non-interactive output writing to w.
+func NewSimpleOutputTo(w io.Writer) *SimpleOutput {
 	return &SimpleOutput{
+		w:          w,
 		operations: make(map[string]*operationState),
 	}
 }
 
 // Update updates the output with a progress message.
 func (s *SimpleOutput) Update(msg types.ProgressMsg) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	op, exists := s.operations[msg.RepoName]
 	if !exists {
 		op = &operationState{
@@ -298,6 +341,9 @@ func (s *SimpleOutput) Update(msg types.ProgressMsg) {
 	op.phase = msg.Phase
 	op.message = msg.Message
 	op.err = msg.Error
+	if msg.CompletedAt != nil {
+		op.endedAt = msg.CompletedAt
+	}
 
 	// Print on phase change or completion
 	if prevPhase != op.phase || op.isComplete() {
@@ -305,17 +351,18 @@ func (s *SimpleOutput) Update(msg types.ProgressMsg) {
 	}
 }
 
+// print writes a single operation line. Callers must hold s.mu.
 func (s *SimpleOutput) print(op *operationState) {
 	symbol := "●"
 	style := lipgloss.NewStyle()
 
-	switch op.phase {
-	case types.PhaseComplete:
-		symbol = "✓"
-		style = SuccessStyle
-	case types.PhaseFailed:
+	switch {
+	case op.failed():
 		symbol = "✗"
 		style = ErrorStyle
+	case op.phase == types.PhaseComplete:
+		symbol = "✓"
+		style = SuccessStyle
 	}
 
 	msg := op.message
@@ -323,7 +370,7 @@ func (s *SimpleOutput) print(op *operationState) {
 		msg = op.err.Error()
 	}
 
-	fmt.Printf("%s %s: %s %s\n",
+	_, _ = fmt.Fprintf(s.w, "%s %s: %s %s\n",
 		style.Render(symbol),
 		op.repoName,
 		string(op.phase),
@@ -333,19 +380,15 @@ func (s *SimpleOutput) print(op *operationState) {
 
 // Complete prints the final summary.
 func (s *SimpleOutput) Complete() {
-	var success, failed int
-	for _, op := range s.operations {
-		if op.err != nil {
-			failed++
-		} else if op.phase == types.PhaseComplete {
-			success++
-		}
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	fmt.Println()
+	success, failed := summarizeOperations(s.operations)
+
+	_, _ = fmt.Fprintln(s.w)
 	if failed == 0 {
-		fmt.Printf("✓ All %d repositories synced successfully\n", success)
+		_, _ = fmt.Fprintf(s.w, "✓ All %d repositories synced successfully\n", success)
 	} else {
-		fmt.Printf("✓ %d synced, ✗ %d failed\n", success, failed)
+		_, _ = fmt.Fprintf(s.w, "✓ %d synced, ✗ %d failed\n", success, failed)
 	}
 }

@@ -93,6 +93,33 @@ func TestNewFromRepository(t *testing.T) {
 	}
 }
 
+func TestNewFromRepository_SeedsSourceURL(t *testing.T) {
+	cfg := &config.Config{
+		General: config.GeneralConfig{Timeout: config.DefaultTimeout},
+	}
+
+	repo := &config.Repository{
+		Name: "test-http",
+		URL:  "https://example.com/file.tar.gz",
+		Type: config.RepoTypeHTTP,
+	}
+
+	dl, err := NewFromRepository(repo, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// A fresh downloader must know its source so Update works without a
+	// prior Download call.
+	httpDL, ok := dl.(*HTTPDownloader)
+	if !ok {
+		t.Fatalf("expected *HTTPDownloader, got %T", dl)
+	}
+	if httpDL.source != repo.URL {
+		t.Errorf("expected source %q, got %q", repo.URL, httpDL.source)
+	}
+}
+
 func TestDetectType(t *testing.T) {
 	tests := []struct {
 		url      string
@@ -106,9 +133,20 @@ func TestDetectType(t *testing.T) {
 		{"https://gitlab.com/user/repo.git", config.RepoTypeGit},
 		{"https://bitbucket.org/user/repo.git", config.RepoTypeGit},
 
+		{"ssh://git@github.com/user/repo", config.RepoTypeGit},
+
 		// HTTP URLs (non-git hosts)
 		{"https://example.com/file.tar.gz", config.RepoTypeHTTP},
 		{"http://example.com/config.json", config.RepoTypeHTTP},
+
+		// Release assets on git forges are plain file downloads.
+		{"https://github.com/user/repo/releases/download/v1.0.0/tool.tar.gz", config.RepoTypeHTTP},
+		{"https://github.com/user/repo/releases/download/v1.0.0/tool.tar.gz?token=abc", config.RepoTypeHTTP},
+
+		// Query strings must not confuse the .git suffix check.
+		{"https://example.com/user/repo.git?ref=main", config.RepoTypeGit},
+		{"https://example.com/file.tar.gz?sig=xyz.git", config.RepoTypeHTTP},
+		{"https://example.com/user/repo.git#fragment", config.RepoTypeGit},
 
 		// Default to git for ambiguous
 		{"some-path", config.RepoTypeGit},

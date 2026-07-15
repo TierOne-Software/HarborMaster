@@ -1,0 +1,16 @@
+# Compiled binaries
+/hm
+/hm.exe
+/hm-*
+/harbormaster
+/dist/
+
+# Local test workspace
+/test-ws/
+
+# Test and coverage output
+*.out
+coverage.html
+
+# Advisory-lock sidecar files
+*.flock

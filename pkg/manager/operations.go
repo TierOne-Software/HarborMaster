@@ -31,12 +31,14 @@ func (m *RepositoryManager) Sync(filter Filter) (*types.SyncResult, error) {
 		return &types.SyncResult{}, nil
 	}
 
-	// Create UI if not provided
+	// Create UI if not provided. Start is a no-op on an already-running
+	// manager and restarts one that has completed, so repeated Sync calls
+	// on the same RepositoryManager are safe.
 	if m.ui == nil {
 		m.ui = ui.NewProgressManager(m.interactive)
-		if err := m.ui.Start(); err != nil {
-			return nil, fmt.Errorf("failed to start UI: %w", err)
-		}
+	}
+	if err := m.ui.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start UI: %w", err)
 	}
 
 	// Create semaphore for concurrency control
@@ -106,10 +108,6 @@ func (m *RepositoryManager) getRepoStatus(repo *config.Repository) RepoStatus {
 	// Get detailed status based on repository type
 	switch repo.Type {
 	case config.RepoTypeGit:
-		if sha, err := downloader.GetRemoteURL(repoPath); err == nil {
-			_ = sha // URL check passed
-		}
-
 		// Get current SHA
 		dl := downloader.NewGitDownloader(downloader.Options{})
 		if sha, err := dl.GetCurrentRef(repoPath); err == nil {
@@ -121,17 +119,23 @@ func (m *RepositoryManager) getRepoStatus(repo *config.Repository) RepoStatus {
 		// Get current branch
 		if branch, err := downloader.GetCurrentBranch(repoPath); err == nil {
 			status.Branch = branch
+		} else if status.Error == nil {
+			status.Error = fmt.Errorf("failed to get current branch: %w", err)
 		}
 
 		// Check if dirty
 		if dirty, err := downloader.IsDirty(repoPath); err == nil {
 			status.IsDirty = dirty
+		} else if status.Error == nil {
+			status.Error = fmt.Errorf("failed to check dirty state: %w", err)
 		}
 	case config.RepoTypeHTTP:
 		// For HTTP, get content hash
 		dl := downloader.NewHTTPDownloader(downloader.Options{})
 		if hash, err := dl.GetCurrentRef(repoPath); err == nil {
 			status.CurrentSHA = hash
+		} else if status.Error == nil {
+			status.Error = fmt.Errorf("failed to get content hash: %w", err)
 		}
 	}
 
@@ -143,6 +147,11 @@ func (m *RepositoryManager) getRepoStatus(repo *config.Repository) RepoStatus {
 		} else {
 			status.NeedsUpdate = true
 		}
+	} else {
+		// Without a lock file there is no recorded SHA to compare against,
+		// so we cannot prove the checkout is current: report that an update
+		// may be needed rather than silently claiming it is up to date.
+		status.NeedsUpdate = true
 	}
 
 	return status

@@ -16,6 +16,11 @@ var (
 	removeForce       bool
 )
 
+// errCancelled is returned when the user declines a confirmation prompt.
+// It is an error so that cancelled operations exit non-zero, which
+// scripts piping input can rely on.
+var errCancelled = fmt.Errorf("cancelled")
+
 var removeCmd = &cobra.Command{
 	Use:     "remove <repository>",
 	Aliases: []string{"rm"},
@@ -53,8 +58,7 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		}
 
 		if !confirm(msg) {
-			fmt.Println("Cancelled")
-			return nil
+			return errCancelled
 		}
 	}
 
@@ -67,9 +71,22 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Save config
-	if err := cfg.Save(); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+	// Remove the repository from any projects that reference it, so the
+	// saved config stays valid.
+	for _, p := range cfg.Projects {
+		for _, r := range p.Repositories {
+			if r == name {
+				if err := cfg.RemoveRepoFromProject(p.Name, name); err != nil {
+					return fmt.Errorf("failed to remove repository from project '%s': %w", p.Name, err)
+				}
+				break
+			}
+		}
+	}
+
+	// Validate and save config
+	if err := saveConfigValidated(); err != nil {
+		return err
 	}
 
 	// Save lock file

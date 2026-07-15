@@ -2,6 +2,7 @@ package manager
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/tierone/harbormaster/pkg/config"
@@ -44,7 +45,19 @@ type WorkPRResult struct {
 	Error    error
 }
 
-// WorkStart creates a new work session, creating a branch across the selected repositories.
+// workStartPlan captures the validated state of a repository before any
+// branch mutation happens.
+type workStartPlan struct {
+	name           string
+	path           string
+	originalBranch string
+	originalSHA    string
+}
+
+// WorkStart creates a new work session, creating a branch across the selected
+// repositories. It is transactional: every repository is validated before any
+// branch is switched, and if switching fails partway through, the already
+// switched repositories are rolled back to their original branches.
 func (m *RepositoryManager) WorkStart(name, branch string, filter Filter) (*work.WorkSession, error) {
 	// Get repositories matching the filter
 	repos, err := m.getRepositories(filter)
@@ -56,7 +69,8 @@ func (m *RepositoryManager) WorkStart(name, branch string, filter Filter) (*work
 		return nil, fmt.Errorf("no repositories matched the filter")
 	}
 
-	ws := work.New(name, branch)
+	// Phase 1: validate every repository before mutating anything.
+	var plans []workStartPlan
 	var skipped []string
 	var dirty []string
 
@@ -101,28 +115,11 @@ func (m *RepositoryManager) WorkStart(name, branch string, filter Filter) (*work
 			originalBranch = currentSHA
 		}
 
-		// Create or checkout branch
-		exists, err := downloader.BranchExists(repoPath, branch)
-		if err != nil {
-			return nil, fmt.Errorf("failed to check branch in %s: %w", repo.Name, err)
-		}
-
-		if exists {
-			if err := downloader.CheckoutBranch(repoPath, branch); err != nil {
-				return nil, fmt.Errorf("failed to checkout branch in %s: %w", repo.Name, err)
-			}
-		} else {
-			if err := downloader.CreateBranch(repoPath, branch); err != nil {
-				return nil, fmt.Errorf("failed to create branch in %s: %w", repo.Name, err)
-			}
-		}
-
-		// Add repo to session
-		_ = ws.AddRepo(work.WorkRepo{
-			Name:           repo.Name,
-			OriginalBranch: originalBranch,
-			OriginalSHA:    currentSHA,
-			AddedAt:        time.Now(),
+		plans = append(plans, workStartPlan{
+			name:           repo.Name,
+			path:           repoPath,
+			originalBranch: originalBranch,
+			originalSHA:    currentSHA,
 		})
 	}
 
@@ -130,14 +127,62 @@ func (m *RepositoryManager) WorkStart(name, branch string, filter Filter) (*work
 		return nil, fmt.Errorf("the following repositories have uncommitted changes: %v\nPlease commit or stash changes before starting a work session", dirty)
 	}
 
-	if len(ws.Repos) == 0 {
+	if len(plans) == 0 {
 		if len(skipped) > 0 {
 			return nil, fmt.Errorf("no git repositories matched the filter (skipped HTTP repos: %v)", skipped)
 		}
 		return nil, fmt.Errorf("no repositories matched the filter")
 	}
 
+	// Phase 2: switch branches. On failure, roll back the repositories that
+	// were already switched so no repo is left stranded on the work branch.
+	ws := work.New(name, branch)
+
+	for i, plan := range plans {
+		if err := checkoutOrCreateBranch(plan.path, branch); err != nil {
+			rollbackErrs := rollbackWorkStart(plans[:i])
+			if len(rollbackErrs) > 0 {
+				return nil, fmt.Errorf("failed to switch %s to branch %s: %w\nadditionally, rolling back already-switched repositories failed: %v", plan.name, branch, err, rollbackErrs)
+			}
+			return nil, fmt.Errorf("failed to switch %s to branch %s: %w\n(already-switched repositories were restored to their original branches)", plan.name, branch, err)
+		}
+
+		_ = ws.AddRepo(work.WorkRepo{
+			Name:           plan.name,
+			OriginalBranch: plan.originalBranch,
+			OriginalSHA:    plan.originalSHA,
+			AddedAt:        time.Now(),
+		})
+	}
+
 	return ws, nil
+}
+
+// checkoutOrCreateBranch checks out the branch if it exists, creating it at
+// the current HEAD otherwise.
+func checkoutOrCreateBranch(repoPath, branch string) error {
+	exists, err := downloader.BranchExists(repoPath, branch)
+	if err != nil {
+		return fmt.Errorf("failed to check branch: %w", err)
+	}
+
+	if exists {
+		return downloader.CheckoutBranch(repoPath, branch)
+	}
+	return downloader.CreateBranch(repoPath, branch)
+}
+
+// rollbackWorkStart restores repositories that were already switched to the
+// work branch back to their original branches. It attempts every repository
+// and returns the errors it could not recover from.
+func rollbackWorkStart(plans []workStartPlan) []error {
+	var errs []error
+	for _, plan := range plans {
+		if err := downloader.CheckoutBranch(plan.path, plan.originalBranch); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", plan.name, err))
+		}
+	}
+	return errs
 }
 
 // WorkAdd adds a single repository to an existing work session.
@@ -185,19 +230,8 @@ func (m *RepositoryManager) WorkAdd(ws *work.WorkSession, repoName string) error
 	}
 
 	// Create or checkout the work session branch
-	exists, err := downloader.BranchExists(repoPath, ws.Branch)
-	if err != nil {
-		return fmt.Errorf("failed to check branch in %s: %w", repoName, err)
-	}
-
-	if exists {
-		if err := downloader.CheckoutBranch(repoPath, ws.Branch); err != nil {
-			return fmt.Errorf("failed to checkout branch in %s: %w", repoName, err)
-		}
-	} else {
-		if err := downloader.CreateBranch(repoPath, ws.Branch); err != nil {
-			return fmt.Errorf("failed to create branch in %s: %w", repoName, err)
-		}
+	if err := checkoutOrCreateBranch(repoPath, ws.Branch); err != nil {
+		return fmt.Errorf("failed to switch %s to branch %s: %w", repoName, ws.Branch, err)
 	}
 
 	return ws.AddRepo(work.WorkRepo{
@@ -221,6 +255,17 @@ func (m *RepositoryManager) WorkRemove(ws *work.WorkSession, repoName string) er
 	}
 
 	repoPath := m.getRepoPath(repo)
+
+	// Refuse to switch away from the work branch with uncommitted changes:
+	// they would either block the checkout or silently follow it onto the
+	// original branch.
+	isDirty, err := downloader.IsDirty(repoPath)
+	if err != nil {
+		return fmt.Errorf("failed to check status of %s: %w", repoName, err)
+	}
+	if isDirty {
+		return fmt.Errorf("repository %s has uncommitted changes; commit or stash them before removing it from the work session", repoName)
+	}
 
 	// Checkout original branch
 	if err := downloader.CheckoutBranch(repoPath, wr.OriginalBranch); err != nil {
@@ -408,11 +453,16 @@ func (m *RepositoryManager) WorkPush(ws *work.WorkSession, repoNames []string) (
 	return results, nil
 }
 
-// WorkEnd ends the work session, restoring all repos to their original branches.
+// WorkEnd ends the work session, restoring all repos to their original
+// branches. It attempts to restore every repository even if some fail, and
+// returns an aggregated error describing every repository it could not
+// restore.
 func (m *RepositoryManager) WorkEnd(ws *work.WorkSession, force bool) error {
-	// Check for dirty repos first (unless force)
+	// Check for dirty repos first (unless force). A repository whose state
+	// cannot be determined is treated as blocking, not as clean.
 	if !force {
 		var dirty []string
+		var unknown []string
 		for _, wr := range ws.Repos {
 			repo, ok := m.config.GetRepository(wr.Name)
 			if !ok {
@@ -424,6 +474,7 @@ func (m *RepositoryManager) WorkEnd(ws *work.WorkSession, force bool) error {
 			}
 			isDirty, err := downloader.IsDirty(repoPath)
 			if err != nil {
+				unknown = append(unknown, fmt.Sprintf("%s (%v)", wr.Name, err))
 				continue
 			}
 			if isDirty {
@@ -431,12 +482,22 @@ func (m *RepositoryManager) WorkEnd(ws *work.WorkSession, force bool) error {
 			}
 		}
 
-		if len(dirty) > 0 {
-			return fmt.Errorf("the following repositories have uncommitted changes: %v\nUse --force to end anyway, or commit/stash changes first", dirty)
+		if len(dirty) > 0 || len(unknown) > 0 {
+			var parts []string
+			if len(dirty) > 0 {
+				parts = append(parts, fmt.Sprintf("the following repositories have uncommitted changes: %v", dirty))
+			}
+			if len(unknown) > 0 {
+				parts = append(parts, fmt.Sprintf("the status of the following repositories could not be determined: %v", unknown))
+			}
+			return fmt.Errorf("%s\nUse --force to end anyway, or commit/stash changes first", strings.Join(parts, "\n"))
 		}
 	}
 
-	// Restore original branches
+	// Restore original branches. Keep going past failures so one broken
+	// repository does not leave all remaining repositories stranded on the
+	// work branch.
+	var restoreErrs []string
 	for _, wr := range ws.Repos {
 		repo, ok := m.config.GetRepository(wr.Name)
 		if !ok {
@@ -448,8 +509,12 @@ func (m *RepositoryManager) WorkEnd(ws *work.WorkSession, force bool) error {
 		}
 
 		if err := downloader.CheckoutBranch(repoPath, wr.OriginalBranch); err != nil {
-			return fmt.Errorf("failed to restore branch for %s: %w", wr.Name, err)
+			restoreErrs = append(restoreErrs, fmt.Sprintf("%s: %v", wr.Name, err))
 		}
+	}
+
+	if len(restoreErrs) > 0 {
+		return fmt.Errorf("failed to restore original branches for %d repositories:\n  %s", len(restoreErrs), strings.Join(restoreErrs, "\n  "))
 	}
 
 	return nil

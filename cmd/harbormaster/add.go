@@ -34,7 +34,9 @@ repository after adding.`,
 
 func init() {
 	addCmd.Flags().StringVarP(&addName, "name", "n", "", "repository name (required)")
-	addCmd.Flags().StringVarP(&addType, "type", "t", "", "repository type (git or http)")
+	// Note: --type deliberately has no shorthand; -t means --tag elsewhere
+	// in the CLI and binding it to --type here would be a trap.
+	addCmd.Flags().StringVar(&addType, "type", "", "repository type (git or http)")
 	addCmd.Flags().StringVarP(&addBranch, "branch", "b", "", "git branch")
 	addCmd.Flags().StringVar(&addTag, "tag", "", "git tag")
 	addCmd.Flags().StringVar(&addCommit, "commit", "", "git commit SHA")
@@ -96,9 +98,10 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Save config
-	if err := cfg.Save(); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+	// Validate and save config. Validation catches bad input (e.g. an
+	// invalid --type) before it is persisted and bricks the workspace.
+	if err := saveConfigValidated(); err != nil {
+		return err
 	}
 
 	if !quiet {
@@ -129,7 +132,11 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		}
 
 		if !quiet {
-			fmt.Printf("Synced at %s\n", result.CommitSHA[:8])
+			if result.CommitSHA != "" {
+				fmt.Printf("Synced at %s\n", shortSHA(result.CommitSHA))
+			} else {
+				fmt.Println("Synced")
+			}
 		}
 	}
 

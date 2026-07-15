@@ -34,6 +34,11 @@ type Downloader interface {
 
 // Options configures downloader behavior.
 type Options struct {
+	// SourceURL is the canonical source location for the dependency. It is
+	// used by Update when no prior Download recorded a source (e.g. a fresh
+	// downloader instance operating on an existing destination).
+	SourceURL string
+
 	// Git-specific options
 	Branch     string
 	Tag        string
@@ -46,6 +51,12 @@ type Options struct {
 	UserAgent     string
 	RetryAttempts int
 	RetryDelay    time.Duration
+
+	// Checksum is the expected SHA-256 of an HTTP download. When set, a
+	// destination that already matches is not re-downloaded, and downloaded
+	// content that does not match is discarded before it can replace the
+	// existing file (used by locked syncs to protect pinned artifacts).
+	Checksum string
 
 	// Common options
 	Timeout time.Duration

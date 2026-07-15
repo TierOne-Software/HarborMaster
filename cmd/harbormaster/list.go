@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	"github.com/tierone/harbormaster/pkg/config"
 )
 
 var (
@@ -26,7 +27,11 @@ var listReposCmd = &cobra.Command{
 	Use:     "repos",
 	Aliases: []string{"repositories", "r"},
 	Short:   "List repositories",
-	RunE:    runListRepos,
+	Long: `List configured repositories.
+
+--project and --tag can be combined; the union of all matching
+repositories is listed.`,
+	RunE: runListRepos,
 }
 
 var listProjectsCmd = &cobra.Command{
@@ -45,8 +50,12 @@ var listTagsCmd = &cobra.Command{
 
 func init() {
 	listCmd.PersistentFlags().BoolVar(&listJSON, "json", false, "output as JSON")
-	listCmd.PersistentFlags().StringVarP(&listProject, "project", "p", "", "filter by project")
-	listCmd.PersistentFlags().StringVarP(&listTag, "tag", "t", "", "filter by tag")
+
+	// --project/--tag only apply to 'list repos'; they are deliberately
+	// not persistent flags so 'list projects'/'list tags' don't silently
+	// accept and ignore them.
+	listReposCmd.Flags().StringVarP(&listProject, "project", "p", "", "filter by project")
+	listReposCmd.Flags().StringVarP(&listTag, "tag", "t", "", "filter by tag")
 
 	listCmd.AddCommand(listReposCmd)
 	listCmd.AddCommand(listProjectsCmd)
@@ -57,21 +66,36 @@ func init() {
 func runListRepos(cmd *cobra.Command, args []string) error {
 	repos := cfg.Repositories
 
-	// Filter by project
-	if listProject != "" {
-		var err error
-		repos, err = cfg.GetRepositoriesForProject(listProject)
-		if err != nil {
-			return err
+	// Filter by project and/or tag; the results are unioned, preserving
+	// config order.
+	if listProject != "" || listTag != "" {
+		include := make(map[string]bool)
+		if listProject != "" {
+			projectRepos, err := cfg.GetRepositoriesForProject(listProject)
+			if err != nil {
+				return err
+			}
+			for _, r := range projectRepos {
+				include[r.Name] = true
+			}
 		}
+		if listTag != "" {
+			for _, r := range cfg.GetRepositoriesByTag(listTag) {
+				include[r.Name] = true
+			}
+		}
+
+		var filtered []config.Repository
+		for _, r := range cfg.Repositories {
+			if include[r.Name] {
+				filtered = append(filtered, r)
+			}
+		}
+		repos = filtered
 	}
 
-	// Filter by tag
-	if listTag != "" {
-		repos = cfg.GetRepositoriesByTag(listTag)
-	}
-
-	if len(repos) == 0 {
+	// JSON output must stay valid with zero repositories.
+	if len(repos) == 0 && !listJSON {
 		fmt.Println("No repositories found")
 		return nil
 	}
@@ -145,7 +169,8 @@ func runListRepos(cmd *cobra.Command, args []string) error {
 func runListProjects(cmd *cobra.Command, args []string) error {
 	projects := cfg.Projects
 
-	if len(projects) == 0 {
+	// JSON output must stay valid with zero projects.
+	if len(projects) == 0 && !listJSON {
 		fmt.Println("No projects configured")
 		return nil
 	}
@@ -204,7 +229,8 @@ func runListTags(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if len(tagSet) == 0 {
+	// JSON output must stay valid with zero tags.
+	if len(tagSet) == 0 && !listJSON {
 		fmt.Println("No tags found")
 		return nil
 	}

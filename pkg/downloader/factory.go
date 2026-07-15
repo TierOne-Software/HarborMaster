@@ -21,7 +21,16 @@ func New(repoType config.RepositoryType, opts Options) (Downloader, error) {
 
 // NewFromRepository creates a Downloader from a repository configuration.
 func NewFromRepository(repo *config.Repository, cfg *config.Config) (Downloader, error) {
+	// A defaulted (not user-set) timeout must not bound git operations: an
+	// initial clone of a large repository can legitimately exceed any
+	// default. HTTP keeps the default as its client timeout.
+	timeout := cfg.General.Timeout
+	if repo.Type == config.RepoTypeGit && !cfg.General.TimeoutExplicit {
+		timeout = 0
+	}
+
 	opts := Options{
+		SourceURL:     repo.URL,
 		Branch:        repo.Branch,
 		Tag:           repo.Tag,
 		Commit:        repo.Commit,
@@ -31,7 +40,14 @@ func NewFromRepository(repo *config.Repository, cfg *config.Config) (Downloader,
 		UserAgent:     cfg.HTTP.UserAgent,
 		RetryAttempts: cfg.HTTP.RetryAttempts,
 		RetryDelay:    cfg.HTTP.RetryDelay,
-		Timeout:       cfg.General.Timeout,
+		Timeout:       timeout,
+	}
+
+	// For HTTP downloads the pinned "commit" is the expected SHA-256 of the
+	// artifact; enforce it as a checksum so a locked sync can never replace
+	// the destination with unverified content.
+	if repo.Type == config.RepoTypeHTTP {
+		opts.Checksum = repo.Commit
 	}
 
 	return New(repo.Type, opts)
@@ -39,13 +55,38 @@ func NewFromRepository(repo *config.Repository, cfg *config.Config) (Downloader,
 
 // DetectType attempts to detect the repository type from the URL.
 func DetectType(url string) config.RepositoryType {
-	// Git URLs
+	// Unambiguous git URL schemes.
 	if strings.HasPrefix(url, "git@") ||
 		strings.HasPrefix(url, "git://") ||
-		strings.HasSuffix(url, ".git") ||
-		strings.Contains(url, "github.com") ||
-		strings.Contains(url, "gitlab.com") ||
-		strings.Contains(url, "bitbucket.org") {
+		strings.HasPrefix(url, "ssh://") {
+		return config.RepoTypeGit
+	}
+
+	// Strip query string and fragment before inspecting the path, so
+	// "repo.git?token=x" is still recognized as git and "file.tar.gz?sig=y"
+	// as a plain download.
+	path := url
+	if i := strings.IndexAny(path, "?#"); i >= 0 {
+		path = path[:i]
+	}
+
+	if strings.HasSuffix(path, ".git") {
+		return config.RepoTypeGit
+	}
+
+	// Release assets hosted on git forges (e.g. GitHub's
+	// .../releases/download/<tag>/<asset>) are plain file downloads, not
+	// repositories.
+	if strings.Contains(path, "/releases/download/") {
+		return config.RepoTypeHTTP
+	}
+
+	// Known git hosting domains. Match against the query-stripped path so a
+	// forge domain appearing in a query parameter does not misclassify a
+	// plain file download.
+	if strings.Contains(path, "github.com") ||
+		strings.Contains(path, "gitlab.com") ||
+		strings.Contains(path, "bitbucket.org") {
 		return config.RepoTypeGit
 	}
 

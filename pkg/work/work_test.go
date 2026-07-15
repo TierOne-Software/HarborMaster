@@ -182,6 +182,113 @@ func TestLoadNonExistent(t *testing.T) {
 	}
 }
 
+func TestLoad_EmptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), WorkFileName)
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for zero-byte work session file")
+	}
+}
+
+func TestLoad_NewerVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), WorkFileName)
+	content := "version = 99\nname = \"x\"\nbranch = \"x\"\ncreated_at = 2026-01-01T00:00:00Z\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for work session file with newer version")
+	}
+}
+
+func TestLoad_UnknownKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), WorkFileName)
+	content := "version = 1\nname = \"x\"\nbranch = \"x\"\ncreated_at = 2026-01-01T00:00:00Z\nfrobnicate = true\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown keys in work session file")
+	}
+	if !contains(err.Error(), "frobnicate") {
+		t.Errorf("expected error to name the unknown key, got: %v", err)
+	}
+}
+
+func TestSave_PreservesExistingFileOnError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, WorkFileName)
+
+	ws := New("test", "test-branch")
+	if err := ws.Save(path); err != nil {
+		t.Fatalf("failed to save: %v", err)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; directory permissions are not enforced")
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	if err := ws.Save(path); err == nil {
+		t.Fatal("expected save to fail in read-only directory")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Error("existing work session file was modified by a failed save")
+	}
+}
+
+func TestSave_FilePermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, WorkFileName)
+
+	ws := New("test", "test-branch")
+	if err := ws.Save(path); err != nil {
+		t.Fatalf("failed to save: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("expected new file mode 0600, got %o", perm)
+	}
+
+	// Existing permissions are preserved on re-save.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.Save(path); err != nil {
+		t.Fatalf("failed to re-save: %v", err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Errorf("expected preserved file mode 0644, got %o", perm)
+	}
+}
+
 func TestFileExists(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, WorkFileName)

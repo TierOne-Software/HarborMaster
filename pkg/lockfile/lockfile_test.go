@@ -1,8 +1,12 @@
 package lockfile
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -77,6 +81,258 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 	if entry.ResolvedSHA != "abc123def456" {
 		t.Errorf("expected SHA 'abc123def456', got '%s'", entry.ResolvedSHA)
+	}
+}
+
+func TestLoad_EmptyFile(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), LockFileName)
+	if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(lockPath)
+	if err == nil {
+		t.Fatal("expected error for zero-byte lock file")
+	}
+}
+
+func TestLoad_MissingVersion(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), LockFileName)
+	content := `
+[entry.repo1]
+url = "https://github.com/test/repo1.git"
+type = "git"
+requested_ref = "main"
+resolved_sha = "abc123"
+last_synced_at = 2026-01-01T00:00:00Z
+`
+	if err := os.WriteFile(lockPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(lockPath)
+	if err == nil {
+		t.Fatal("expected error for lock file without version")
+	}
+}
+
+func TestLoad_NewerVersion(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), LockFileName)
+	content := "version = 99\ngenerated_at = 2026-01-01T00:00:00Z\n"
+	if err := os.WriteFile(lockPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(lockPath)
+	if err == nil {
+		t.Fatal("expected error for lock file with newer version")
+	}
+}
+
+func TestLoad_UnknownKeys(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), LockFileName)
+	content := "version = 1\ngenerated_at = 2026-01-01T00:00:00Z\nfrobnicate = true\n"
+	if err := os.WriteFile(lockPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(lockPath)
+	if err == nil {
+		t.Fatal("expected error for unknown keys in lock file")
+	}
+	if !strings.Contains(err.Error(), "frobnicate") {
+		t.Errorf("expected error to name the unknown key, got: %v", err)
+	}
+}
+
+func TestSave_PreservesExistingFileOnError(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, LockFileName)
+
+	lf := New()
+	lf.Update("repo1", LockEntry{URL: "https://example.com/1.git", Type: "git", ResolvedSHA: "abc"})
+	if err := lf.Save(lockPath); err != nil {
+		t.Fatalf("failed to save: %v", err)
+	}
+	original, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; directory permissions are not enforced")
+	}
+	if err := os.Chmod(tmpDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o755) })
+
+	if err := lf.Save(lockPath); err == nil {
+		t.Fatal("expected save to fail in read-only directory")
+	}
+
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Error("existing lock file was modified by a failed save")
+	}
+}
+
+func TestSave_FilePermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	lockPath := filepath.Join(tmpDir, LockFileName)
+
+	lf := New()
+	if err := lf.Save(lockPath); err != nil {
+		t.Fatalf("failed to save: %v", err)
+	}
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("expected new file mode 0600, got %o", perm)
+	}
+
+	// Existing permissions are preserved on re-save.
+	if err := os.Chmod(lockPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := lf.Save(lockPath); err != nil {
+		t.Fatalf("failed to re-save: %v", err)
+	}
+	info, err = os.Stat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Errorf("expected preserved file mode 0644, got %o", perm)
+	}
+}
+
+func TestLockUnlock(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), LockFileName)
+
+	l, err := Lock(lockPath)
+	if err != nil {
+		t.Fatalf("failed to acquire lock: %v", err)
+	}
+	if err := l.Unlock(); err != nil {
+		t.Fatalf("failed to release lock: %v", err)
+	}
+
+	// Unlock is idempotent and nil-safe.
+	if err := l.Unlock(); err != nil {
+		t.Errorf("second Unlock should be a no-op, got: %v", err)
+	}
+	var nilLock *FileLock
+	if err := nilLock.Unlock(); err != nil {
+		t.Errorf("nil Unlock should be a no-op, got: %v", err)
+	}
+
+	// The lock can be re-acquired after release.
+	l2, err := Lock(lockPath)
+	if err != nil {
+		t.Fatalf("failed to re-acquire lock: %v", err)
+	}
+	if err := l2.Unlock(); err != nil {
+		t.Fatalf("failed to release re-acquired lock: %v", err)
+	}
+}
+
+func TestMutate_Contention(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), LockFileName)
+
+	const (
+		workers    = 8
+		iterations = 20
+	)
+
+	// Each worker performs read-modify-write cycles incrementing a shared
+	// counter stored in the lock file. Without inter-process locking these
+	// concurrent load-modify-save cycles lose updates (last writer wins).
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				err := Mutate(lockPath, func(lf *LockFile) error {
+					count := 0
+					if entry, ok := lf.Get("counter"); ok {
+						n, err := strconv.Atoi(entry.ResolvedSHA)
+						if err != nil {
+							return fmt.Errorf("bad counter value %q: %w", entry.ResolvedSHA, err)
+						}
+						count = n
+					}
+					lf.Update("counter", LockEntry{
+						URL:          "https://example.com/counter.git",
+						Type:         "git",
+						RequestedRef: "main",
+						ResolvedSHA:  strconv.Itoa(count + 1),
+						LastSyncedAt: time.Now(),
+					})
+					return nil
+				})
+				if err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("mutate failed: %v", err)
+	}
+
+	lf, err := Load(lockPath)
+	if err != nil {
+		t.Fatalf("failed to load lock file: %v", err)
+	}
+	entry, ok := lf.Get("counter")
+	if !ok {
+		t.Fatal("counter entry missing")
+	}
+	want := strconv.Itoa(workers * iterations)
+	if entry.ResolvedSHA != want {
+		t.Errorf("lost updates under contention: expected counter %s, got %s", want, entry.ResolvedSHA)
+	}
+}
+
+func TestMutate_ErrorLeavesFileUnchanged(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), LockFileName)
+
+	lf := New()
+	lf.Update("repo1", LockEntry{URL: "https://example.com/1.git", Type: "git", ResolvedSHA: "abc"})
+	if err := lf.Save(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sentinel := fmt.Errorf("boom")
+	err = Mutate(lockPath, func(lf *LockFile) error {
+		lf.Update("repo2", LockEntry{URL: "https://example.com/2.git", Type: "git"})
+		return sentinel
+	})
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected sentinel error, got: %v", err)
+	}
+
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Error("lock file was modified even though fn returned an error")
 	}
 }
 

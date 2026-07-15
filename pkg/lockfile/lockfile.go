@@ -3,6 +3,7 @@ package lockfile
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -47,44 +48,55 @@ func Load(path string) (*LockFile, error) {
 		return lf, nil
 	}
 
-	if _, err := toml.DecodeFile(path, lf); err != nil {
+	md, err := toml.DecodeFile(path, lf)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse lock file: %w", err)
+	}
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		keys := make([]string, len(undecoded))
+		for i, k := range undecoded {
+			keys[i] = k.String()
+		}
+		return nil, fmt.Errorf("unknown key(s) in lock file %s: %s", path, strings.Join(keys, ", "))
+	}
+
+	// An empty or truncated file decodes without error but leaves Version at
+	// zero; treat that (and unknown future versions) as an error instead of
+	// silently loading an empty lock file.
+	if lf.Version < 1 {
+		return nil, fmt.Errorf("lock file %s has invalid version %d (file may be corrupt or truncated)", path, lf.Version)
+	}
+	if lf.Version > CurrentVersion {
+		return nil, fmt.Errorf("lock file %s has version %d, but this version of harbormaster only supports up to version %d", path, lf.Version, CurrentVersion)
 	}
 
 	lf.path = path
 	return lf, nil
 }
 
-// Save writes the lock file to disk.
+// Save writes the lock file to disk. The file is written atomically (temp
+// file + rename), so an existing lock file is never truncated by a failed
+// save.
+//
+// Save does not acquire the inter-process lock; use Lock/Mutate to guard
+// read-modify-write cycles against concurrent harbormaster processes.
 func (lf *LockFile) Save(path string) error {
 	lf.GeneratedAt = time.Now()
 
-	f, err := os.Create(path)
+	err := writeFileAtomic(path, func(f *os.File) error {
+		// Write header comment
+		header := "# Harbormaster Lock File\n" +
+			"# DO NOT EDIT - This file is auto-generated\n" +
+			"# Use 'hm sync' to update\n\n"
+		if _, err := f.WriteString(header); err != nil {
+			return err
+		}
+		if err := toml.NewEncoder(f).Encode(lf); err != nil {
+			return fmt.Errorf("failed to encode lock file: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("failed to create lock file: %w", err)
-	}
-
-	// Write header comment
-	if _, err := f.WriteString("# Harbormaster Lock File\n"); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if _, err := f.WriteString("# DO NOT EDIT - This file is auto-generated\n"); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if _, err := f.WriteString("# Use 'hm sync' to update\n\n"); err != nil {
-		_ = f.Close()
-		return err
-	}
-
-	encoder := toml.NewEncoder(f)
-	if err := encoder.Encode(lf); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("failed to encode lock file: %w", err)
-	}
-
-	if err := f.Close(); err != nil {
 		return fmt.Errorf("failed to write lock file: %w", err)
 	}
 
