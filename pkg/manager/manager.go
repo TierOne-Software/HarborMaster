@@ -151,6 +151,19 @@ func (m *RepositoryManager) getRepoPath(repo *config.Repository) string {
 	return filepath.Join(m.workDir, repo.GetEffectivePath())
 }
 
+// shortSHA returns an abbreviated SHA for display. It is safe to call with
+// SHAs shorter than 8 characters (e.g. from a corrupt lock file) and with
+// the empty string.
+func shortSHA(sha string) string {
+	if sha == "" {
+		return "(unknown)"
+	}
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
+}
+
 // GetRepoPath returns the full path for a repository.
 func (m *RepositoryManager) GetRepoPath(repo *config.Repository) string {
 	return m.getRepoPath(repo)
@@ -191,8 +204,17 @@ func (m *RepositoryManager) syncRepository(repo *config.Repository) types.Operat
 		targetSHA = sha
 	}
 
-	// Create downloader
-	dl, err := downloader.NewFromRepository(repo, m.config)
+	// Create downloader. In locked mode, target the locked SHA explicitly so
+	// the downloader checks out the recorded commit rather than the branch
+	// tip (the Commit option takes precedence over Branch/Tag).
+	dlRepo := repo
+	if targetSHA != "" {
+		lockedRepo := *repo
+		lockedRepo.Commit = targetSHA
+		dlRepo = &lockedRepo
+	}
+
+	dl, err := downloader.NewFromRepository(dlRepo, m.config)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to create downloader: %w", err)
 		result.Duration = time.Since(startTime)
@@ -226,6 +248,21 @@ func (m *RepositoryManager) syncRepository(repo *config.Repository) types.Operat
 
 	// Process progress updates
 	for update := range progressCh {
+		// A failed update is terminal: surface it to the UI as an error so
+		// the repository renders as failed (never as a silent success).
+		if update.Error != nil || update.Phase == types.PhaseFailed {
+			updateErr := update.Error
+			if updateErr == nil {
+				updateErr = fmt.Errorf("sync failed: %s", update.Message)
+			}
+			result.Error = updateErr
+			result.Duration = time.Since(startTime)
+			if m.ui != nil {
+				m.ui.SendProgress(ui.CreateErrorMsg(repo.Name, repo.URL, updateErr))
+			}
+			return result
+		}
+
 		if m.ui != nil {
 			percent := 0.0
 			if update.BytesTotal > 0 {
@@ -235,12 +272,6 @@ func (m *RepositoryManager) syncRepository(repo *config.Repository) types.Operat
 				repo.Name, repo.URL,
 				update.Phase, percent, update.Message,
 			))
-		}
-
-		if update.Error != nil {
-			result.Error = update.Error
-			result.Duration = time.Since(startTime)
-			return result
 		}
 
 		if update.Phase == types.PhaseComplete {
@@ -263,7 +294,7 @@ func (m *RepositoryManager) syncRepository(repo *config.Repository) types.Operat
 
 	// Verify locked SHA if in locked mode
 	if m.locked && targetSHA != "" && sha != targetSHA {
-		result.Error = fmt.Errorf("SHA mismatch: expected %s, got %s", targetSHA[:8], sha[:8])
+		result.Error = fmt.Errorf("SHA mismatch: expected %s, got %s", shortSHA(targetSHA), shortSHA(sha))
 		result.Duration = time.Since(startTime)
 		if m.ui != nil {
 			m.ui.SendProgress(ui.CreateErrorMsg(repo.Name, repo.URL, result.Error))
@@ -279,7 +310,7 @@ func (m *RepositoryManager) syncRepository(repo *config.Repository) types.Operat
 	if m.ui != nil {
 		m.ui.SendProgress(ui.CreateCompletedMsg(
 			repo.Name, repo.URL,
-			fmt.Sprintf("Synced at %s", sha[:8]),
+			fmt.Sprintf("Synced at %s", shortSHA(sha)),
 		))
 	}
 

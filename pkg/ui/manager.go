@@ -9,155 +9,150 @@ import (
 )
 
 // ProgressManager coordinates UI display for concurrent operations.
+//
+// Lifecycle: Start -> SendProgress (any goroutine) -> Complete.
+// After Complete, the manager can be restarted with Start for a
+// subsequent run (e.g. a second Sync on the same RepositoryManager).
 type ProgressManager struct {
+	mu          sync.Mutex
 	program     *tea.Program
-	model       Model
+	programDone chan struct{}
 	msgChan     chan types.ProgressMsg
-	resultChan  chan types.OperationResult
-	results     []types.OperationResult
-	resultMu    sync.Mutex
-	done        chan struct{}
+	drained     chan struct{}
 	started     bool
+	completed   bool
 	interactive bool
 	simple      *SimpleOutput
 }
 
 // NewProgressManager creates a new UI manager.
 func NewProgressManager(interactive bool) *ProgressManager {
-	pm := &ProgressManager{
-		model:       NewModel(),
-		msgChan:     make(chan types.ProgressMsg, 100),
-		resultChan:  make(chan types.OperationResult, 100),
-		results:     []types.OperationResult{},
-		done:        make(chan struct{}),
+	return &ProgressManager{
 		interactive: interactive,
 	}
-
-	if !interactive {
-		pm.simple = NewSimpleOutput()
-	}
-
-	return pm
 }
 
-// Start initializes the UI manager.
+// Start initializes the UI manager. Calling Start on an already-running
+// manager is a no-op; calling it after Complete restarts the manager.
 func (pm *ProgressManager) Start() error {
-	if pm.started {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if pm.started && !pm.completed {
 		return nil
 	}
+
 	pm.started = true
+	pm.completed = false
+	pm.msgChan = make(chan types.ProgressMsg, 100)
+	pm.drained = make(chan struct{})
 
 	if pm.interactive {
-		pm.program = tea.NewProgram(pm.model)
+		pm.program = tea.NewProgram(NewModel())
+		pm.programDone = make(chan struct{})
 
-		// Start the message processor
-		go pm.processMessages()
-
-		// Run the program in background
+		// Run the program in the background. programDone is closed whenever
+		// Run returns, including when it fails to start (e.g. no TTY), which
+		// is the only reliable way to wait on it: tea.Program.Wait can block
+		// forever if Run bailed out before initializing.
+		program := pm.program
+		programDone := pm.programDone
 		go func() {
-			_, _ = pm.program.Run()
+			defer close(programDone)
+			_, _ = program.Run()
 		}()
+
+		go pm.processMessages(pm.msgChan, pm.drained, program)
 	} else {
-		go pm.processMessagesSimple()
+		pm.simple = NewSimpleOutput()
+		go pm.processMessagesSimple(pm.msgChan, pm.drained, pm.simple)
 	}
 
 	return nil
 }
 
-func (pm *ProgressManager) processMessages() {
-	for {
-		select {
-		case msg, ok := <-pm.msgChan:
-			if !ok {
-				return
-			}
-			if pm.program != nil {
-				pm.program.Send(ProgressMsg(msg))
-			}
-		case result, ok := <-pm.resultChan:
-			if !ok {
-				return
-			}
-			pm.resultMu.Lock()
-			pm.results = append(pm.results, result)
-			pm.resultMu.Unlock()
-		case <-pm.done:
-			return
-		}
+// processMessages forwards progress messages to the Bubbletea program until
+// the message channel is closed, then signals that all messages have been
+// delivered.
+func (pm *ProgressManager) processMessages(msgChan <-chan types.ProgressMsg, drained chan<- struct{}, program *tea.Program) {
+	for msg := range msgChan {
+		program.Send(ProgressMsg(msg))
 	}
+	close(drained)
 }
 
-func (pm *ProgressManager) processMessagesSimple() {
-	for {
-		select {
-		case msg, ok := <-pm.msgChan:
-			if !ok {
-				return
-			}
-			if pm.simple != nil {
-				pm.simple.Update(msg)
-			}
-		case result, ok := <-pm.resultChan:
-			if !ok {
-				return
-			}
-			pm.resultMu.Lock()
-			pm.results = append(pm.results, result)
-			pm.resultMu.Unlock()
-		case <-pm.done:
-			return
-		}
+// processMessagesSimple forwards progress messages to the simple output until
+// the message channel is closed, then signals that all messages have been
+// delivered.
+func (pm *ProgressManager) processMessagesSimple(msgChan <-chan types.ProgressMsg, drained chan<- struct{}, simple *SimpleOutput) {
+	for msg := range msgChan {
+		simple.Update(msg)
 	}
+	close(drained)
 }
 
 // SendProgress sends a progress update to the UI.
+//
+// Terminal messages (completed/failed, or any message carrying an error) are
+// never dropped: they determine the final success/failure rendering.
+// Intermediate updates (e.g. percentage ticks) may be dropped if the UI
+// cannot keep up.
 func (pm *ProgressManager) SendProgress(msg types.ProgressMsg) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if !pm.started || pm.completed {
+		return
+	}
+
+	if msg.IsComplete() || msg.Error != nil {
+		// Blocking send: the processor goroutine is draining the channel,
+		// and Complete cannot close it while we hold the mutex.
+		pm.msgChan <- msg
+		return
+	}
+
 	select {
 	case pm.msgChan <- msg:
 	default:
-		// Channel full, drop message
+		// Channel full: dropping an intermediate update is harmless.
 	}
 }
 
-// SendResult sends an operation result.
-func (pm *ProgressManager) SendResult(result types.OperationResult) {
-	select {
-	case pm.resultChan <- result:
-	default:
-	}
-}
-
-// Wait blocks until Complete is called and returns the sync result.
-func (pm *ProgressManager) Wait() *types.SyncResult {
-	<-pm.done
-
-	pm.resultMu.Lock()
-	defer pm.resultMu.Unlock()
-
-	return types.NewSyncResult(pm.results, 0)
-}
-
-// Complete signals that all operations are complete.
+// Complete signals that all operations are complete. It drains all pending
+// progress messages before rendering the final summary, so no terminal
+// message can be lost or reordered. Calling Complete more than once is safe.
 func (pm *ProgressManager) Complete(duration time.Duration) {
-	if pm.interactive && pm.program != nil {
-		pm.program.Send(CompleteMsg{})
-		// Give the UI time to render the final state
-		time.Sleep(100 * time.Millisecond)
-		pm.program.Quit()
-	} else if pm.simple != nil {
-		pm.simple.Complete()
+	_ = duration
+
+	pm.mu.Lock()
+	if !pm.started || pm.completed {
+		pm.mu.Unlock()
+		return
 	}
+	pm.completed = true
+	msgChan := pm.msgChan
+	drained := pm.drained
+	program := pm.program
+	programDone := pm.programDone
+	simple := pm.simple
+	pm.mu.Unlock()
 
-	close(pm.done)
-}
+	// No new messages are accepted past this point (completed is set), so
+	// closing the channel is safe. Wait until the processor has delivered
+	// every buffered message before rendering the summary.
+	close(msgChan)
+	<-drained
 
-// Stop gracefully shuts down the UI.
-func (pm *ProgressManager) Stop() {
-	close(pm.msgChan)
-	close(pm.resultChan)
-
-	if pm.program != nil {
-		pm.program.Quit()
+	if pm.interactive && program != nil {
+		// The completion message is sequenced strictly after all progress
+		// messages because the channel has been fully drained. CompleteMsg
+		// makes the model render the final summary and quit; Send is a no-op
+		// if the program already exited (or never managed to start).
+		program.Send(CompleteMsg{})
+		<-programDone
+	} else if simple != nil {
+		simple.Complete()
 	}
 }
 
