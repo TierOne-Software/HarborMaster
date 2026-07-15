@@ -2,10 +2,11 @@ package main
 
 import (
 	"fmt"
+	"os"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"github.com/tierone/harbormaster/pkg/manager"
-	"github.com/tierone/harbormaster/pkg/ui"
 )
 
 var (
@@ -14,6 +15,7 @@ var (
 	syncTag      string
 	syncParallel int
 	syncDryRun   bool
+	syncForce    bool
 )
 
 var syncCmd = &cobra.Command{
@@ -21,11 +23,15 @@ var syncCmd = &cobra.Command{
 	Short: "Synchronize repositories",
 	Long: `Synchronize repositories based on the configuration.
 
-Without arguments, syncs all repositories. Specify repository names
-to sync specific ones, or use --project to sync a project's repositories.
+Without arguments, syncs all repositories. Positional repository names,
+--project, and --tag can be combined; the union of all matching
+repositories is synced.
 
 Use --locked to sync to the exact commits recorded in the lock file
-for reproducible builds.`,
+for reproducible builds.
+
+Syncing is refused while a work session is active, since it may switch
+branches under the session. Use --force to sync anyway.`,
 	RunE: runSync,
 }
 
@@ -35,48 +41,53 @@ func init() {
 	syncCmd.Flags().StringVarP(&syncTag, "tag", "t", "", "sync repositories with tag")
 	syncCmd.Flags().IntVar(&syncParallel, "parallel", 4, "number of concurrent operations")
 	syncCmd.Flags().BoolVar(&syncDryRun, "dry-run", false, "show what would be synced")
+	syncCmd.Flags().BoolVar(&syncForce, "force", false, "sync even if a work session is active")
 	rootCmd.AddCommand(syncCmd)
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
-	// Build filter
-	filter := manager.Filter{}
-	if len(args) > 0 {
-		filter.Names = args
-	} else if syncProject != "" {
-		filter.Projects = []string{syncProject}
-	} else if syncTag != "" {
-		filter.Tags = []string{syncTag}
-	} else {
-		filter.All = true
+	// Refuse to sync while a work session is active: syncing checks out
+	// configured refs and would pull repositories off the session branch.
+	if ws != nil && !syncForce {
+		return fmt.Errorf("a work session '%s' is active; syncing would switch branches\nEnd it with 'hm work end' or use --force to sync anyway", ws.Name)
 	}
 
-	// Create manager
+	// Build filter: positional names, --project, and --tag are unioned.
+	filter := buildFilter(args, syncProject, syncTag)
+
+	// Dry run - just show what would be synced
+	if syncDryRun {
+		mgr := manager.NewRepositoryManager(cfg,
+			manager.WithLockFile(lf),
+			manager.WithLocked(syncLocked),
+		)
+		return runSyncDryRun(mgr, filter)
+	}
+
+	// Use the interactive (full-screen) UI only when stdout is a
+	// terminal; piped output gets plain line-oriented progress.
+	interactive := !quiet && isatty.IsTerminal(os.Stdout.Fd())
+
 	mgr := manager.NewRepositoryManager(cfg,
 		manager.WithLockFile(lf),
 		manager.WithConcurrency(syncParallel),
 		manager.WithLocked(syncLocked),
-		manager.WithInteractive(!quiet),
+		manager.WithInteractive(interactive),
 	)
 
-	// Dry run - just show what would be synced
-	if syncDryRun {
-		return runSyncDryRun(mgr, filter)
+	// With --quiet, silence stdout for the duration of the sync: the
+	// progress UI writes to stdout unconditionally. Failures are still
+	// reported on stderr below, so --quiet can never hide an error.
+	if quiet {
+		if devnull, devErr := os.OpenFile(os.DevNull, os.O_WRONLY, 0); devErr == nil {
+			orig := os.Stdout
+			os.Stdout = devnull
+			defer func() {
+				os.Stdout = orig
+				_ = devnull.Close()
+			}()
+		}
 	}
-
-	// Create and start UI
-	uiMgr := ui.NewProgressManager(!quiet)
-	if err := uiMgr.Start(); err != nil {
-		return fmt.Errorf("failed to start UI: %w", err)
-	}
-
-	mgr = manager.NewRepositoryManager(cfg,
-		manager.WithLockFile(lf),
-		manager.WithConcurrency(syncParallel),
-		manager.WithLocked(syncLocked),
-		manager.WithInteractive(!quiet),
-		manager.WithUI(uiMgr),
-	)
 
 	// Run sync
 	result, err := mgr.Sync(filter)
@@ -91,14 +102,15 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Return error if any operations failed
+	// Return error if any operations failed. Details always go to stderr
+	// so machine consumers of stdout never see them and --quiet cannot
+	// hide failures.
 	if result.HasFailures() {
-		// Print details for each failure
 		for _, f := range result.FailedResults() {
 			if f.Error != nil {
-				fmt.Printf("  %s: %v\n", f.RepoName, f.Error)
+				fmt.Fprintf(os.Stderr, "  %s: %v\n", f.RepoName, f.Error)
 			} else {
-				fmt.Printf("  %s: unknown error\n", f.RepoName)
+				fmt.Fprintf(os.Stderr, "  %s: unknown error\n", f.RepoName)
 			}
 		}
 		return fmt.Errorf("%d of %d repositories failed to sync", result.FailureCount, result.TotalRepos)
@@ -129,10 +141,10 @@ func runSyncDryRun(mgr *manager.RepositoryManager, filter manager.Filter) error 
 
 		fmt.Printf("  %s: %s (%s)\n", s.Name, action, s.RequestedRef)
 		if s.Exists && s.CurrentSHA != "" {
-			fmt.Printf("    Current: %s\n", s.CurrentSHA[:8])
+			fmt.Printf("    Current: %s\n", shortSHA(s.CurrentSHA))
 		}
 		if s.LockedSHA != "" {
-			fmt.Printf("    Locked:  %s\n", s.LockedSHA[:8])
+			fmt.Printf("    Locked:  %s\n", shortSHA(s.LockedSHA))
 		}
 	}
 

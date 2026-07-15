@@ -42,8 +42,9 @@ var workStartCmd = &cobra.Command{
 	Long: `Start a new work session. Creates the named branch in all matching
 repositories and tracks them as a group.
 
-Repositories can be selected by name, project, or tag. If no filter is
-specified, all git repositories in the workspace are included.`,
+Repositories can be selected by name, project, or tag; all selectors
+are combined as a union. If no filter is specified, all git
+repositories in the workspace are included.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runWorkStart,
 }
@@ -162,20 +163,8 @@ func runWorkStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("a work session is already active: '%s'\nUse 'hm work end' to finish it first", ws.Name)
 	}
 
-	// Build filter
-	filter := manager.Filter{}
-	if len(repoNames) > 0 {
-		filter.Names = repoNames
-	}
-	if workProject != "" {
-		filter.Projects = []string{workProject}
-	}
-	if workTag != "" {
-		filter.Tags = []string{workTag}
-	}
-	if len(filter.Names) == 0 && len(filter.Projects) == 0 && len(filter.Tags) == 0 {
-		filter.All = true
-	}
+	// Build filter: names, --project, and --tag are unioned.
+	filter := buildFilter(repoNames, workProject, workTag)
 
 	// Create manager
 	mgr := manager.NewRepositoryManager(cfg,
@@ -419,11 +408,9 @@ func runWorkCommit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	repoNames := args
-	if workAll {
-		repoNames = nil // nil means all repos
-	} else if len(repoNames) == 0 {
-		return fmt.Errorf("specify repository names or use --all")
+	repoNames, err := workTargetRepos(args)
+	if err != nil {
+		return err
 	}
 
 	mgr := manager.NewRepositoryManager(cfg,
@@ -435,23 +422,18 @@ func runWorkCommit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if !quiet {
-		for _, r := range results {
-			if r.Error != nil {
-				fmt.Printf("  %s %s: %s\n", ui.ErrorStyle.Render("✗"), r.RepoName, r.Error)
-			} else if r.SHA == "" {
-				fmt.Printf("  %s %s: nothing to commit\n", ui.WarningStyle.Render("-"), r.RepoName)
-			} else {
-				fmt.Printf("  %s %s: %s\n", ui.SuccessStyle.Render("✓"), r.RepoName, r.SHA[:min(8, len(r.SHA))])
-			}
-		}
-	}
-
+	// Failures always go to stderr, even with --quiet.
 	hasErrors := false
 	for _, r := range results {
 		if r.Error != nil {
 			hasErrors = true
-			break
+			fmt.Fprintf(os.Stderr, "  %s %s: %s\n", ui.ErrorStyle.Render("✗"), r.RepoName, r.Error)
+		} else if !quiet {
+			if r.SHA == "" {
+				fmt.Printf("  %s %s: nothing to commit\n", ui.WarningStyle.Render("-"), r.RepoName)
+			} else {
+				fmt.Printf("  %s %s: %s\n", ui.SuccessStyle.Render("✓"), r.RepoName, shortSHA(r.SHA))
+			}
 		}
 	}
 	if hasErrors {
@@ -461,16 +443,30 @@ func runWorkCommit(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// workTargetRepos resolves the repositories a work subcommand operates on.
+// Either explicit names or --all must be given, but not both; with --all
+// it returns nil, which the manager treats as "all session repos".
+func workTargetRepos(args []string) ([]string, error) {
+	if workAll {
+		if len(args) > 0 {
+			return nil, fmt.Errorf("cannot combine --all with explicit repository names")
+		}
+		return nil, nil
+	}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("specify repository names or use --all")
+	}
+	return args, nil
+}
+
 func runWorkPush(cmd *cobra.Command, args []string) error {
 	if err := requireWorkSession(); err != nil {
 		return err
 	}
 
-	repoNames := args
-	if workAll {
-		repoNames = nil
-	} else if len(repoNames) == 0 {
-		return fmt.Errorf("specify repository names or use --all")
+	repoNames, err := workTargetRepos(args)
+	if err != nil {
+		return err
 	}
 
 	mgr := manager.NewRepositoryManager(cfg,
@@ -482,21 +478,14 @@ func runWorkPush(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if !quiet {
-		for _, r := range results {
-			if r.Error != nil {
-				fmt.Printf("  %s %s: %s\n", ui.ErrorStyle.Render("✗"), r.RepoName, r.Error)
-			} else {
-				fmt.Printf("  %s %s: pushed to origin/%s\n", ui.SuccessStyle.Render("✓"), r.RepoName, ws.Branch)
-			}
-		}
-	}
-
+	// Failures always go to stderr, even with --quiet.
 	hasErrors := false
 	for _, r := range results {
 		if r.Error != nil {
 			hasErrors = true
-			break
+			fmt.Fprintf(os.Stderr, "  %s %s: %s\n", ui.ErrorStyle.Render("✗"), r.RepoName, r.Error)
+		} else if !quiet {
+			fmt.Printf("  %s %s: pushed to origin/%s\n", ui.SuccessStyle.Render("✓"), r.RepoName, ws.Branch)
 		}
 	}
 	if hasErrors {
@@ -516,11 +505,12 @@ func runWorkPR(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("GitHub CLI (gh) is required for PR creation\nInstall it from https://cli.github.com/")
 	}
 
-	repoNames := args
-	if workAll {
+	repoNames, err := workTargetRepos(args)
+	if err != nil {
+		return err
+	}
+	if repoNames == nil {
 		repoNames = ws.RepoNames()
-	} else if len(repoNames) == 0 {
-		return fmt.Errorf("specify repository names or use --all")
 	}
 
 	title := workTitle
@@ -535,14 +525,14 @@ func runWorkPR(cmd *cobra.Command, args []string) error {
 	hasErrors := false
 	for _, name := range repoNames {
 		if !ws.HasRepo(name) {
-			fmt.Printf("  %s %s: not in work session\n", ui.ErrorStyle.Render("✗"), name)
+			fmt.Fprintf(os.Stderr, "  %s %s: not in work session\n", ui.ErrorStyle.Render("✗"), name)
 			hasErrors = true
 			continue
 		}
 
 		repo, ok := cfg.GetRepository(name)
 		if !ok {
-			fmt.Printf("  %s %s: not found in config\n", ui.ErrorStyle.Render("✗"), name)
+			fmt.Fprintf(os.Stderr, "  %s %s: not found in config\n", ui.ErrorStyle.Render("✗"), name)
 			hasErrors = true
 			continue
 		}
@@ -558,7 +548,7 @@ func runWorkPR(cmd *cobra.Command, args []string) error {
 		ghCmd.Dir = repoPath
 		output, err := ghCmd.CombinedOutput()
 		if err != nil {
-			fmt.Printf("  %s %s: %s\n", ui.ErrorStyle.Render("✗"), name, strings.TrimSpace(string(output)))
+			fmt.Fprintf(os.Stderr, "  %s %s: %s\n", ui.ErrorStyle.Render("✗"), name, strings.TrimSpace(string(output)))
 			hasErrors = true
 			continue
 		}

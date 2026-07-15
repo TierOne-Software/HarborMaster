@@ -99,9 +99,9 @@ func runProjectAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Save config
-	if err := cfg.Save(); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+	// Validate and save config
+	if err := saveConfigValidated(); err != nil {
+		return err
 	}
 
 	if !quiet {
@@ -135,8 +135,7 @@ func runProjectRemove(cmd *cobra.Command, args []string) error {
 		}
 
 		if !confirm(msg) {
-			fmt.Println("Cancelled")
-			return nil
+			return errCancelled
 		}
 	}
 
@@ -149,9 +148,9 @@ func runProjectRemove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Save config
-	if err := cfg.Save(); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+	// Validate and save config
+	if err := saveConfigValidated(); err != nil {
+		return err
 	}
 
 	if !quiet {
@@ -174,9 +173,9 @@ func runProjectAddRepo(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Save config
-	if err := cfg.Save(); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+	// Validate and save config
+	if err := saveConfigValidated(); err != nil {
+		return err
 	}
 
 	if !quiet {
@@ -199,9 +198,9 @@ func runProjectRemoveRepo(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Save config
-	if err := cfg.Save(); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+	// Validate and save config
+	if err := saveConfigValidated(); err != nil {
+		return err
 	}
 
 	if !quiet {

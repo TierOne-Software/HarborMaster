@@ -75,16 +75,26 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
 
-	// Create empty lock file
-	lf := lockfile.New()
-	if err := lf.Save(lockPath); err != nil {
-		return fmt.Errorf("failed to create lock file: %w", err)
+	// Create an empty lock file, but never overwrite an existing one:
+	// it records resolved SHAs and must survive re-initialization.
+	lockExisted := false
+	if _, err := os.Stat(lockPath); err == nil {
+		lockExisted = true
+	} else {
+		lf := lockfile.New()
+		if err := lf.Save(lockPath); err != nil {
+			return fmt.Errorf("failed to create lock file: %w", err)
+		}
 	}
 
 	if !quiet {
 		fmt.Println("Initialized Harbormaster workspace:")
 		fmt.Printf("  Config: %s\n", configPath)
-		fmt.Printf("  Lock:   %s\n", lockPath)
+		if lockExisted {
+			fmt.Printf("  Lock:   %s (existing, preserved)\n", lockPath)
+		} else {
+			fmt.Printf("  Lock:   %s\n", lockPath)
+		}
 		if initExample {
 			fmt.Println("\nExample configuration created. Edit the config file to add your repositories.")
 		} else {

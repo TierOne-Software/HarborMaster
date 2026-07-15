@@ -34,15 +34,8 @@ func init() {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	// Build filter
-	filter := manager.Filter{}
-	if len(args) > 0 {
-		filter.Names = args
-	} else if statusProject != "" {
-		filter.Projects = []string{statusProject}
-	} else {
-		filter.All = true
-	}
+	// Build filter: positional names and --project are unioned.
+	filter := buildFilter(args, statusProject, "")
 
 	// Create manager
 	mgr := manager.NewRepositoryManager(cfg,
@@ -55,18 +48,20 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if len(statuses) == 0 {
-		fmt.Println("No repositories configured")
-		return nil
-	}
-
-	// Output based on format
+	// Output based on format. Machine-readable formats must stay valid
+	// with zero repositories: JSON emits an empty array, porcelain emits
+	// no lines.
 	if statusJSON {
 		return outputStatusJSON(statuses)
 	}
 
 	if statusPorcelain {
 		return outputStatusPorcelain(statuses)
+	}
+
+	if len(statuses) == 0 {
+		fmt.Println("No repositories configured")
+		return nil
 	}
 
 	return outputStatusTable(statuses)
@@ -111,24 +106,9 @@ func outputStatusJSON(statuses []manager.RepoStatus) error {
 
 func outputStatusPorcelain(statuses []manager.RepoStatus) error {
 	for _, s := range statuses {
-		status := "ok"
-		if !s.Exists {
-			status = "missing"
-		} else if s.NeedsUpdate {
-			status = "outdated"
-		} else if s.IsDirty {
-			status = "dirty"
-		}
-		if s.Error != nil {
-			status = "error"
-		}
-
-		sha := s.CurrentSHA
-		if sha != "" && len(sha) > 8 {
-			sha = sha[:8]
-		}
-
-		fmt.Printf("%s\t%s\t%s\t%s\n", s.Name, status, sha, s.RequestedRef)
+		// Use the same status precedence as the table output.
+		_, status := getStatusString(s)
+		fmt.Printf("%s\t%s\t%s\t%s\n", s.Name, status, shortSHA(s.CurrentSHA), s.RequestedRef)
 	}
 	return nil
 }
@@ -158,7 +138,7 @@ func outputStatusTable(statuses []manager.RepoStatus) error {
 
 		commit := "-"
 		if s.CurrentSHA != "" {
-			commit = s.CurrentSHA[:min(8, len(s.CurrentSHA))]
+			commit = shortSHA(s.CurrentSHA)
 		}
 
 		lockStatus := "-"
@@ -185,6 +165,9 @@ func outputStatusTable(statuses []manager.RepoStatus) error {
 	return nil
 }
 
+// getStatusString returns the styled and plain status for a repository.
+// Precedence (used by both table and porcelain output):
+// error > missing > dirty > outdated > ok.
 func getStatusString(s manager.RepoStatus) (styled string, plain string) {
 	if s.Error != nil {
 		return ui.ErrorStyle.Render("error"), "error"
@@ -199,11 +182,4 @@ func getStatusString(s manager.RepoStatus) (styled string, plain string) {
 		return ui.WarningStyle.Render("outdated"), "outdated"
 	}
 	return ui.SuccessStyle.Render("ok"), "ok"
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

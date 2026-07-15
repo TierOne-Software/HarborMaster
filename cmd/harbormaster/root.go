@@ -3,7 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 	"github.com/tierone/harbormaster/pkg/config"
 	"github.com/tierone/harbormaster/pkg/lockfile"
@@ -21,6 +24,11 @@ var (
 	cfg *config.Config
 	lf  *lockfile.LockFile
 
+	// Inter-process workspace lock, held from PersistentPreRunE until the
+	// command finishes so concurrent hm runs cannot interleave lockfile
+	// writes or repository mutations.
+	wsLock *lockfile.FileLock
+
 	// Active work session (nil if none)
 	ws *work.WorkSession
 )
@@ -37,8 +45,14 @@ synchronize your repositories.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// Skip config loading for init command
-		if cmd.Name() == "init" || cmd.Name() == "help" || cmd.Name() == "version" {
+		// Honor --no-color before anything renders styled output.
+		if noColor {
+			lipgloss.SetColorProfile(termenv.Ascii)
+		}
+
+		// Skip config loading for commands that must work outside a workspace:
+		// init, help, and cobra's completion machinery.
+		if skipsConfigLoading(cmd) {
 			return nil
 		}
 
@@ -66,8 +80,15 @@ synchronize your repositories.`,
 			cfg.General.WorkDir = expandedPath
 		}
 
-		// Load lock file
+		// Serialize workspace access across hm processes before reading the
+		// lock file; blocks until any other hm run in this workspace finishes.
 		lockPath := getLockFilePath()
+		wsLock, err = lockfile.Lock(lockPath)
+		if err != nil {
+			return fmt.Errorf("failed to lock workspace: %w", err)
+		}
+
+		// Load lock file
 		lf, err = lockfile.Load(lockPath)
 		if err != nil {
 			return fmt.Errorf("failed to load lock file: %w", err)
@@ -84,6 +105,11 @@ synchronize your repositories.`,
 
 		return nil
 	},
+	// Runs only after a successful RunE; on error paths the OS releases the
+	// flock at process exit.
+	PersistentPostRun: func(cmd *cobra.Command, args []string) {
+		_ = wsLock.Unlock()
+	},
 }
 
 func init() {
@@ -93,18 +119,34 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colored output")
 }
 
-func getLockFilePath() string {
-	if cfg != nil && cfg.Path() != "" {
-		dir := getConfigDir()
-		return dir + "/" + lockfile.LockFileName
+// skipsConfigLoading reports whether cmd should run without a workspace
+// (no config, lock file, or work session loaded).
+func skipsConfigLoading(cmd *cobra.Command) bool {
+	switch cmd.Name() {
+	case "init", "help", "completion",
+		cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+		return true
 	}
-	cwd, _ := os.Getwd()
-	return cwd + "/" + lockfile.LockFileName
+	// Shell completion subcommands: `hm completion bash|zsh|fish|powershell`.
+	if cmd.Parent() != nil && cmd.Parent().Name() == "completion" {
+		return true
+	}
+	return false
 }
 
+func getLockFilePath() string {
+	return filepath.Join(getConfigDir(), lockfile.LockFileName)
+}
+
+// getConfigDir returns the directory containing the loaded config file,
+// falling back to the current working directory.
 func getConfigDir() string {
 	if cfg != nil && cfg.Path() != "" {
-		return cfg.Path()[:len(cfg.Path())-len(config.ConfigFileName)-1]
+		abs, err := filepath.Abs(cfg.Path())
+		if err != nil {
+			return filepath.Dir(cfg.Path())
+		}
+		return filepath.Dir(abs)
 	}
 	cwd, _ := os.Getwd()
 	return cwd
@@ -118,8 +160,7 @@ func saveLockFile() error {
 }
 
 func getWorkFilePath() string {
-	dir := getConfigDir()
-	return dir + "/" + work.WorkFileName
+	return filepath.Join(getConfigDir(), work.WorkFileName)
 }
 
 func saveWorkFile() error {
