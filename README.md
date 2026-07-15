@@ -4,9 +4,17 @@ A command-line tool for managing and synchronizing multiple repositories.
 
 ## Installation
 
+Build from source:
+
 ```bash
-go install github.com/TierOne-Software/HarborMaster/cmd/harbormaster@latest
+git clone https://github.com/tierone/harbormaster.git
+cd harbormaster
+make build
 ```
+
+This produces the `hm` binary in the repository root; copy it somewhere on your `PATH` (e.g. `install -m 0755 hm ~/.local/bin/`).
+
+Alternatively, from a clone you can run `go install ./cmd/harbormaster` (or `make install`) — note this installs the binary under the name `harbormaster`, not `hm`.
 
 ## Quick Start
 
