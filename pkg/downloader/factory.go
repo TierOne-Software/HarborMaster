@@ -21,6 +21,14 @@ func New(repoType config.RepositoryType, opts Options) (Downloader, error) {
 
 // NewFromRepository creates a Downloader from a repository configuration.
 func NewFromRepository(repo *config.Repository, cfg *config.Config) (Downloader, error) {
+	// A defaulted (not user-set) timeout must not bound git operations: an
+	// initial clone of a large repository can legitimately exceed any
+	// default. HTTP keeps the default as its client timeout.
+	timeout := cfg.General.Timeout
+	if repo.Type == config.RepoTypeGit && !cfg.General.TimeoutExplicit {
+		timeout = 0
+	}
+
 	opts := Options{
 		SourceURL:     repo.URL,
 		Branch:        repo.Branch,
@@ -32,7 +40,14 @@ func NewFromRepository(repo *config.Repository, cfg *config.Config) (Downloader,
 		UserAgent:     cfg.HTTP.UserAgent,
 		RetryAttempts: cfg.HTTP.RetryAttempts,
 		RetryDelay:    cfg.HTTP.RetryDelay,
-		Timeout:       cfg.General.Timeout,
+		Timeout:       timeout,
+	}
+
+	// For HTTP downloads the pinned "commit" is the expected SHA-256 of the
+	// artifact; enforce it as a checksum so a locked sync can never replace
+	// the destination with unverified content.
+	if repo.Type == config.RepoTypeHTTP {
+		opts.Checksum = repo.Commit
 	}
 
 	return New(repo.Type, opts)
@@ -66,10 +81,12 @@ func DetectType(url string) config.RepositoryType {
 		return config.RepoTypeHTTP
 	}
 
-	// Known git hosting domains.
-	if strings.Contains(url, "github.com") ||
-		strings.Contains(url, "gitlab.com") ||
-		strings.Contains(url, "bitbucket.org") {
+	// Known git hosting domains. Match against the query-stripped path so a
+	// forge domain appearing in a query parameter does not misclassify a
+	// plain file download.
+	if strings.Contains(path, "github.com") ||
+		strings.Contains(path, "gitlab.com") ||
+		strings.Contains(path, "bitbucket.org") {
 		return config.RepoTypeGit
 	}
 

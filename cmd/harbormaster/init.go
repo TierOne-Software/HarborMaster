@@ -75,12 +75,23 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
 
-	// Create an empty lock file, but never overwrite an existing one:
-	// it records resolved SHAs and must survive re-initialization.
+	// Create an empty lock file, but never overwrite an existing readable
+	// one: it records resolved SHAs and must survive re-initialization. An
+	// existing file that cannot be loaded is backed up and reset, making
+	// 'init --force' the repair path for a corrupt lock file.
 	lockExisted := false
+	lockBackup := ""
 	if _, err := os.Stat(lockPath); err == nil {
-		lockExisted = true
-	} else {
+		if _, loadErr := lockfile.Load(lockPath); loadErr == nil {
+			lockExisted = true
+		} else {
+			lockBackup = lockPath + ".corrupt"
+			if err := os.Rename(lockPath, lockBackup); err != nil {
+				return fmt.Errorf("failed to back up corrupt lock file: %w", err)
+			}
+		}
+	}
+	if !lockExisted {
 		lf := lockfile.New()
 		if err := lf.Save(lockPath); err != nil {
 			return fmt.Errorf("failed to create lock file: %w", err)
@@ -90,9 +101,12 @@ func runInit(cmd *cobra.Command, args []string) error {
 	if !quiet {
 		fmt.Println("Initialized Harbormaster workspace:")
 		fmt.Printf("  Config: %s\n", configPath)
-		if lockExisted {
+		switch {
+		case lockExisted:
 			fmt.Printf("  Lock:   %s (existing, preserved)\n", lockPath)
-		} else {
+		case lockBackup != "":
+			fmt.Printf("  Lock:   %s (previous file was corrupt; backed up to %s)\n", lockPath, lockBackup)
+		default:
 			fmt.Printf("  Lock:   %s\n", lockPath)
 		}
 		if initExample {

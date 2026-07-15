@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +39,10 @@ type Config struct {
 	Repositories []Repository
 	Projects     []Project
 	configPath   string // Path to the config file
+
+	// workDirOverride marks General.WorkDir as a one-off runtime override
+	// (e.g. the --work-dir flag) that must never be persisted by Save.
+	workDirOverride bool
 }
 
 // GeneralConfig holds general settings.
@@ -47,6 +52,7 @@ type GeneralConfig struct {
 	CacheDir         string
 	CacheDirOriginal string // Original value from config (for saving back)
 	Timeout          time.Duration
+	TimeoutExplicit  bool // Timeout was set in the config file, not defaulted
 	DefaultBranch    string
 	RecurseSubmodule bool
 }
@@ -77,7 +83,7 @@ type ConfigFile struct {
 type GeneralConfigFile struct {
 	WorkDir          string `toml:"work_dir"`
 	CacheDir         string `toml:"cache_dir"`
-	Timeout          string `toml:"timeout"`
+	Timeout          string `toml:"timeout,omitempty"`
 	DefaultBranch    string `toml:"default_branch"`
 	RecurseSubmodule *bool  `toml:"recurse_submodule"`
 }
@@ -95,35 +101,58 @@ type GitConfigFile struct {
 	CloneDepth   *int  `toml:"clone_depth"`
 }
 
-// Load reads and parses the configuration file.
+// Load reads and parses the configuration file. Unknown keys and validation
+// failures are errors; commands that must work on a broken workspace should
+// use LoadRelaxed instead.
 func Load(path string) (*Config, error) {
+	cfg, warnings, err := load(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(warnings) > 0 {
+		return nil, errors.New(strings.Join(warnings, "; "))
+	}
+	return cfg, nil
+}
+
+// LoadRelaxed reads the configuration like Load but demotes unknown-key and
+// validation failures to warnings, so read-only and repair commands (status,
+// list, remove) can operate on a config that strict commands refuse to load.
+// TOML parse and path-expansion errors are still fatal.
+func LoadRelaxed(path string) (*Config, []string, error) {
+	return load(path)
+}
+
+func load(path string) (*Config, []string, error) {
 	// Resolve the path immediately so that later saves are not affected by
 	// working-directory changes when a relative path was passed in.
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve config path: %w", err)
+		return nil, nil, fmt.Errorf("failed to resolve config path: %w", err)
 	}
 
 	var cf ConfigFile
 	md, err := toml.DecodeFile(absPath, &cf)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+
+	var warnings []string
 	if err := checkUndecodedKeys(md, "config file"); err != nil {
-		return nil, err
+		warnings = append(warnings, err.Error())
 	}
 
 	cfg, err := parseConfigFile(&cf, absPath)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cfg.configPath = absPath
 
 	if err := ValidateConfig(cfg); err != nil {
-		return nil, fmt.Errorf("config validation failed: %w", err)
+		warnings = append(warnings, fmt.Sprintf("config validation failed: %v", err))
 	}
 
-	return cfg, nil
+	return cfg, warnings, nil
 }
 
 // checkUndecodedKeys returns an error if the TOML document contained keys
@@ -200,6 +229,15 @@ func (c *Config) SaveTo(path string) error {
 // Path returns the path to the config file.
 func (c *Config) Path() string {
 	return c.configPath
+}
+
+// SetWorkDirOverride applies a one-off runtime override of the work
+// directory (e.g. the --work-dir CLI flag). The override affects all
+// path resolution through General.WorkDir but is never written back to
+// the config file by Save.
+func (c *Config) SetWorkDirOverride(path string) {
+	c.General.WorkDir = path
+	c.workDirOverride = true
 }
 
 // GetRepository returns a repository by name.
@@ -378,6 +416,7 @@ func parseConfigFile(cf *ConfigFile, configPath string) (*Config, error) {
 			return nil, fmt.Errorf("failed to parse timeout: %w", err)
 		}
 		cfg.General.Timeout = timeout
+		cfg.General.TimeoutExplicit = true
 	} else {
 		cfg.General.Timeout = DefaultTimeout
 	}
@@ -491,9 +530,18 @@ func toConfigFile(c *Config, configDir string) *ConfigFile {
 
 	// General config - preserve original (relative) values when they still
 	// match the runtime paths, but write programmatic changes through.
-	cf.General.WorkDir = pathValueForSave(c.General.WorkDirOriginal, c.General.WorkDir, configDir)
+	// A runtime override (--work-dir) is never persisted.
+	if c.workDirOverride {
+		cf.General.WorkDir = c.General.WorkDirOriginal
+	} else {
+		cf.General.WorkDir = pathValueForSave(c.General.WorkDirOriginal, c.General.WorkDir, configDir)
+	}
 	cf.General.CacheDir = pathValueForSave(c.General.CacheDirOriginal, c.General.CacheDir, configDir)
-	cf.General.Timeout = c.General.Timeout.String()
+	// Only persist a timeout the user chose; writing the default out would
+	// turn it into an explicit setting on the next load.
+	if c.General.TimeoutExplicit {
+		cf.General.Timeout = c.General.Timeout.String()
+	}
 	cf.General.DefaultBranch = c.General.DefaultBranch
 	cf.General.RecurseSubmodule = &c.General.RecurseSubmodule
 

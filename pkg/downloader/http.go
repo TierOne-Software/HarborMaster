@@ -80,6 +80,15 @@ func (h *HTTPDownloader) download(source, destination string, progress chan type
 		return "", fmt.Errorf("failed to create directory: %w", err)
 	}
 
+	// If the destination already matches the expected checksum there is
+	// nothing to do; this also keeps locked syncs from ever touching a
+	// pinned artifact.
+	if h.options.Checksum != "" {
+		if hash, err := hashFile(destination); err == nil && hash == h.options.Checksum {
+			return hash, nil
+		}
+	}
+
 	// Bound the whole operation (all attempts and retry sleeps) by the
 	// configured timeout so retries cannot outlive it.
 	ctx, cancel := h.newContext()
@@ -138,6 +147,15 @@ func (e *httpStatusError) Error() string {
 	return fmt.Sprintf("HTTP %d: %s", e.code, e.status)
 }
 
+// checksumError reports downloaded content not matching Options.Checksum.
+type checksumError struct {
+	expected, got string
+}
+
+func (e *checksumError) Error() string {
+	return fmt.Sprintf("checksum mismatch: expected %s, got %s", e.expected, e.got)
+}
+
 // isRetryableError reports whether a download error is worth retrying.
 // Client errors such as 404 are definitive and are not retried; server
 // errors, throttling, and network errors are.
@@ -147,6 +165,11 @@ func isRetryableError(err error) bool {
 		return statusErr.code >= 500 ||
 			statusErr.code == http.StatusTooManyRequests ||
 			statusErr.code == http.StatusRequestTimeout
+	}
+	// A checksum mismatch is definitive: the server sent the wrong content.
+	var ckErr *checksumError
+	if errors.As(err, &ckErr) {
+		return false
 	}
 	// Network-level errors are considered transient.
 	return true
@@ -250,6 +273,15 @@ func (h *HTTPDownloader) downloadFile(ctx context.Context, source, destination s
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
+	// Verify the expected checksum before the file can replace the
+	// destination, so a changed or tampered upstream never clobbers a
+	// pinned artifact.
+	hash := hex.EncodeToString(hasher.Sum(nil))
+	if h.options.Checksum != "" && hash != h.options.Checksum {
+		_ = os.Remove(tmpPath)
+		return "", &checksumError{expected: h.options.Checksum, got: hash}
+	}
+
 	// os.CreateTemp creates the file with 0600; match os.Create's default.
 	if err := os.Chmod(tmpPath, 0o644); err != nil {
 		_ = os.Remove(tmpPath)
@@ -261,7 +293,7 @@ func (h *HTTPDownloader) downloadFile(ctx context.Context, source, destination s
 		return "", fmt.Errorf("failed to move file into place: %w", err)
 	}
 
-	return hex.EncodeToString(hasher.Sum(nil)), nil
+	return hash, nil
 }
 
 func hashFile(path string) (string, error) {

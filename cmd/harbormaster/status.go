@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/tierone/harbormaster/pkg/manager"
@@ -106,11 +107,34 @@ func outputStatusJSON(statuses []manager.RepoStatus) error {
 
 func outputStatusPorcelain(statuses []manager.RepoStatus) error {
 	for _, s := range statuses {
-		// Use the same status precedence as the table output.
-		_, status := getStatusString(s)
-		fmt.Printf("%s\t%s\t%s\t%s\n", s.Name, status, shortSHA(s.CurrentSHA), s.RequestedRef)
+		fmt.Printf("%s\t%s\t%s\t%s\n", s.Name, porcelainStates(s), shortSHA(s.CurrentSHA), s.RequestedRef)
 	}
 	return nil
+}
+
+// porcelainStates lists every state that applies to the repository,
+// comma-separated in severity order (error, missing, dirty, outdated), so
+// scripts keying on any one state keep seeing it when several apply at
+// once. The table output shows only the most severe state.
+func porcelainStates(s manager.RepoStatus) string {
+	var states []string
+	if s.Error != nil {
+		states = append(states, "error")
+	}
+	if !s.Exists {
+		states = append(states, "missing")
+	} else {
+		if s.IsDirty {
+			states = append(states, "dirty")
+		}
+		if s.NeedsUpdate {
+			states = append(states, "outdated")
+		}
+	}
+	if len(states) == 0 {
+		return "ok"
+	}
+	return strings.Join(states, ",")
 }
 
 func outputStatusTable(statuses []manager.RepoStatus) error {
@@ -165,9 +189,9 @@ func outputStatusTable(statuses []manager.RepoStatus) error {
 	return nil
 }
 
-// getStatusString returns the styled and plain status for a repository.
-// Precedence (used by both table and porcelain output):
-// error > missing > dirty > outdated > ok.
+// getStatusString returns the styled and plain status for the table output:
+// the single most severe state, in the same severity order porcelainStates
+// uses (error > missing > dirty > outdated > ok).
 func getStatusString(s manager.RepoStatus) (styled string, plain string) {
 	if s.Error != nil {
 		return ui.ErrorStyle.Render("error"), "error"

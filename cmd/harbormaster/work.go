@@ -177,10 +177,17 @@ func runWorkStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Save session
+	// Save session. If the session file cannot be written, nothing records
+	// the branch switches WorkStart just made, so roll them back rather
+	// than stranding every repository on an untracked work branch.
 	ws = session
 	if err := saveWorkFile(); err != nil {
-		return fmt.Errorf("failed to save work session: %w", err)
+		ws = nil
+		if rbErr := mgr.WorkEnd(session, true); rbErr != nil {
+			return fmt.Errorf("failed to save work session: %w\n"+
+				"rollback also failed: %v — repositories may still be on branch %q", err, rbErr, branch)
+		}
+		return fmt.Errorf("failed to save work session: %w (repositories were restored to their original branches)", err)
 	}
 
 	if !quiet {

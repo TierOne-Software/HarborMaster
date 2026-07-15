@@ -52,6 +52,12 @@ type Options struct {
 	RetryAttempts int
 	RetryDelay    time.Duration
 
+	// Checksum is the expected SHA-256 of an HTTP download. When set, a
+	// destination that already matches is not re-downloaded, and downloaded
+	// content that does not match is discarded before it can replace the
+	// existing file (used by locked syncs to protect pinned artifacts).
+	Checksum string
+
 	// Common options
 	Timeout time.Duration
 }

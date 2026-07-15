@@ -56,42 +56,67 @@ synchronize your repositories.`,
 			return nil
 		}
 
-		// Load configuration
-		var err error
-		if cfgFile != "" {
-			cfg, err = config.Load(cfgFile)
-		} else {
-			cfgPath, findErr := config.FindConfigFile()
+		// Resolve the config path without loading the file, so the workspace
+		// lock can be acquired first: the config file is part of the state
+		// the lock protects, and loading it before locking would let two
+		// concurrent commands save stale copies over each other.
+		cfgPath := cfgFile
+		if cfgPath == "" {
+			found, findErr := config.FindConfigFile()
 			if findErr != nil {
 				return fmt.Errorf("no config file found: %w\nRun 'hm init' to create one", findErr)
 			}
-			cfg, err = config.Load(cfgPath)
+			cfgPath = found
 		}
+		absCfgPath, err := filepath.Abs(cfgPath)
 		if err != nil {
-			return fmt.Errorf("failed to load config: %w", err)
+			return fmt.Errorf("failed to resolve config path: %w", err)
 		}
 
-		// Override work directory if specified
-		if workDir != "" {
-			expandedPath, err := config.ExpandPath(workDir)
-			if err != nil {
-				return fmt.Errorf("invalid work directory: %w", err)
-			}
-			cfg.General.WorkDir = expandedPath
-		}
-
-		// Serialize workspace access across hm processes before reading the
-		// lock file; blocks until any other hm run in this workspace finishes.
-		lockPath := getLockFilePath()
+		// Serialize workspace access across hm processes; blocks until any
+		// other hm run in this workspace finishes.
+		lockPath := filepath.Join(filepath.Dir(absCfgPath), lockfile.LockFileName)
 		wsLock, err = lockfile.Lock(lockPath)
 		if err != nil {
 			return fmt.Errorf("failed to lock workspace: %w", err)
 		}
 
+		// Load configuration. Read-only and repair commands tolerate a
+		// config that fails validation, so a broken workspace can still be
+		// inspected and fixed from the CLI.
+		if allowsInvalidConfig(cmd) {
+			var warnings []string
+			cfg, warnings, err = config.LoadRelaxed(absCfgPath)
+			for _, w := range warnings {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+			}
+		} else {
+			cfg, err = config.Load(absCfgPath)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+
+		// Override work directory if specified; the override is runtime-only
+		// and is never persisted by config saves.
+		if workDir != "" {
+			expandedPath, err := config.ExpandPath(workDir)
+			if err != nil {
+				return fmt.Errorf("invalid work directory: %w", err)
+			}
+			cfg.SetWorkDirOverride(expandedPath)
+		}
+
 		// Load lock file
 		lf, err = lockfile.Load(lockPath)
 		if err != nil {
-			return fmt.Errorf("failed to load lock file: %w", err)
+			if allowsInvalidConfig(cmd) {
+				fmt.Fprintf(os.Stderr, "warning: ignoring unreadable lock file: %v\n", err)
+				lf = lockfile.New()
+			} else {
+				return fmt.Errorf("failed to load lock file: %w\n"+
+					"If the file is corrupt, run 'hm init --force' to reset it (a backup is kept), or delete %s and run 'hm sync' to regenerate it", err, lockPath)
+			}
 		}
 
 		// Load work session if one exists
@@ -117,6 +142,19 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&workDir, "work-dir", "w", "", "override work directory")
 	rootCmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "minimal output")
 	rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colored output")
+}
+
+// allowsInvalidConfig reports whether cmd should run even when the config
+// (or lock file) fails validation, so users can inspect and repair a broken
+// workspace with the CLI instead of hand-editing TOML. Mutating commands in
+// this set still validate the final state before saving.
+func allowsInvalidConfig(cmd *cobra.Command) bool {
+	switch cmd.Name() {
+	case "status", "remove", "remove-repo",
+		"list", "repos", "projects", "tags":
+		return true
+	}
+	return false
 }
 
 // skipsConfigLoading reports whether cmd should run without a workspace

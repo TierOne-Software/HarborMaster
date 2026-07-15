@@ -84,6 +84,13 @@ func (g *GitDownloader) download(source, destination string, progress chan types
 		return "", fmt.Errorf("failed to clone: %w", err)
 	}
 
+	// A pinned commit may not be reachable from any branch or tag tip (e.g.
+	// after a force-push); fall back to fetching it directly, exactly as the
+	// update path does.
+	if err := g.ensureCommitAvailable(destination, progress); err != nil {
+		return "", err
+	}
+
 	if g.options.GetEffectiveRef() != "" {
 		sendUpdate(progress, types.ProgressUpdate{
 			Phase:   types.PhaseCheckout,
