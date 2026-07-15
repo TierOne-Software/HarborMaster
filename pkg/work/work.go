@@ -3,6 +3,7 @@ package work
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -58,42 +59,50 @@ func Load(path string) (*WorkSession, error) {
 	}
 
 	ws := &WorkSession{}
-	if _, err := toml.DecodeFile(path, ws); err != nil {
+	md, err := toml.DecodeFile(path, ws)
+	if err != nil {
 		return nil, fmt.Errorf("failed to parse work session file: %w", err)
+	}
+	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		keys := make([]string, len(undecoded))
+		for i, k := range undecoded {
+			keys[i] = k.String()
+		}
+		return nil, fmt.Errorf("unknown key(s) in work session file %s: %s", path, strings.Join(keys, ", "))
+	}
+
+	// An empty or truncated file decodes without error but leaves Version at
+	// zero; treat that (and unknown future versions) as an error instead of
+	// silently loading an empty session.
+	if ws.Version < 1 {
+		return nil, fmt.Errorf("work session file %s has invalid version %d (file may be corrupt or truncated)", path, ws.Version)
+	}
+	if ws.Version > CurrentVersion {
+		return nil, fmt.Errorf("work session file %s has version %d, but this version of harbormaster only supports up to version %d", path, ws.Version, CurrentVersion)
 	}
 
 	ws.path = path
 	return ws, nil
 }
 
-// Save writes the work session to disk.
+// Save writes the work session to disk. The file is written atomically
+// (temp file + rename), so an existing session file is never truncated by a
+// failed save.
 func (ws *WorkSession) Save(path string) error {
-	f, err := os.Create(path)
+	err := writeFileAtomic(path, func(f *os.File) error {
+		// Write header comment
+		header := "# Harbormaster Work Session\n" +
+			"# DO NOT EDIT - This file is auto-generated\n" +
+			"# Use 'hm work end' to finish the current session\n\n"
+		if _, err := f.WriteString(header); err != nil {
+			return err
+		}
+		if err := toml.NewEncoder(f).Encode(ws); err != nil {
+			return fmt.Errorf("failed to encode work session: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("failed to create work session file: %w", err)
-	}
-
-	// Write header comment
-	if _, err := f.WriteString("# Harbormaster Work Session\n"); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if _, err := f.WriteString("# DO NOT EDIT - This file is auto-generated\n"); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if _, err := f.WriteString("# Use 'hm work end' to finish the current session\n\n"); err != nil {
-		_ = f.Close()
-		return err
-	}
-
-	encoder := toml.NewEncoder(f)
-	if err := encoder.Encode(ws); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("failed to encode work session: %w", err)
-	}
-
-	if err := f.Close(); err != nil {
 		return fmt.Errorf("failed to write work session file: %w", err)
 	}
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -96,22 +97,49 @@ type GitConfigFile struct {
 
 // Load reads and parses the configuration file.
 func Load(path string) (*Config, error) {
-	var cf ConfigFile
-	if _, err := toml.DecodeFile(path, &cf); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	// Resolve the path immediately so that later saves are not affected by
+	// working-directory changes when a relative path was passed in.
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve config path: %w", err)
 	}
 
-	cfg, err := parseConfigFile(&cf, path)
+	var cf ConfigFile
+	md, err := toml.DecodeFile(absPath, &cf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	if err := checkUndecodedKeys(md, "config file"); err != nil {
+		return nil, err
+	}
+
+	cfg, err := parseConfigFile(&cf, absPath)
 	if err != nil {
 		return nil, err
 	}
-	cfg.configPath = path
+	cfg.configPath = absPath
 
 	if err := ValidateConfig(cfg); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
 	return cfg, nil
+}
+
+// checkUndecodedKeys returns an error if the TOML document contained keys
+// that do not map to any known field. This catches typos such as
+// "default_brnach" or "[[repositories]]" that would otherwise be silently
+// ignored.
+func checkUndecodedKeys(md toml.MetaData, what string) error {
+	undecoded := md.Undecoded()
+	if len(undecoded) == 0 {
+		return nil
+	}
+	keys := make([]string, len(undecoded))
+	for i, k := range undecoded {
+		keys[i] = k.String()
+	}
+	return fmt.Errorf("unknown key(s) in %s: %s", what, strings.Join(keys, ", "))
 }
 
 // FindConfigFile searches for the configuration file in the workspace root.
@@ -140,26 +168,32 @@ func (c *Config) Save() error {
 	return c.SaveTo(c.configPath)
 }
 
-// SaveTo writes the configuration to the specified path.
+// SaveTo writes the configuration to the specified path. The file is
+// written atomically (temp file + rename), so an existing config file is
+// never truncated by a failed save.
 func (c *Config) SaveTo(path string) error {
-	cf := toConfigFile(c)
-
-	f, err := os.Create(path)
+	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return fmt.Errorf("failed to create config file: %w", err)
+		return fmt.Errorf("failed to resolve config path: %w", err)
 	}
 
-	encoder := toml.NewEncoder(f)
-	if err := encoder.Encode(cf); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("failed to encode config: %w", err)
-	}
+	cf := toConfigFile(c, filepath.Dir(absPath))
 
-	if err := f.Close(); err != nil {
+	err = writeFileAtomic(absPath, func(f *os.File) error {
+		if err := toml.NewEncoder(f).Encode(cf); err != nil {
+			return fmt.Errorf("failed to encode config: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
-	c.configPath = path
+	c.configPath = absPath
+	// Keep the "original" path values in sync with what was written, so
+	// that in-memory state matches a subsequent Load of the saved file.
+	c.General.WorkDirOriginal = cf.General.WorkDir
+	c.General.CacheDirOriginal = cf.General.CacheDir
 	return nil
 }
 
@@ -317,15 +351,11 @@ func parseConfigFile(cf *ConfigFile, configPath string) (*Config, error) {
 	// Store original value for saving back to file
 	cfg.General.WorkDirOriginal = cf.General.WorkDir
 	if cf.General.WorkDir != "" {
-		workDir, err := ExpandPath(cf.General.WorkDir)
+		workDir, err := resolvePathValue(cf.General.WorkDir, configDir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand work_dir: %w", err)
 		}
-		// If work_dir is relative, resolve it against the config file's directory
-		if !filepath.IsAbs(workDir) {
-			workDir = filepath.Join(configDir, workDir)
-		}
-		cfg.General.WorkDir = filepath.Clean(workDir)
+		cfg.General.WorkDir = workDir
 	} else {
 		// Default to the config file's directory
 		cfg.General.WorkDir = configDir
@@ -335,15 +365,11 @@ func parseConfigFile(cf *ConfigFile, configPath string) (*Config, error) {
 	// Store original value for saving back to file
 	cfg.General.CacheDirOriginal = cf.General.CacheDir
 	if cf.General.CacheDir != "" {
-		cacheDir, err := ExpandPath(cf.General.CacheDir)
+		cacheDir, err := resolvePathValue(cf.General.CacheDir, configDir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand cache_dir: %w", err)
 		}
-		// If cache_dir is relative, resolve it against the config file's directory
-		if !filepath.IsAbs(cacheDir) {
-			cacheDir = filepath.Join(configDir, cacheDir)
-		}
-		cfg.General.CacheDir = filepath.Clean(cacheDir)
+		cfg.General.CacheDir = cacheDir
 	}
 
 	if cf.General.Timeout != "" {
@@ -430,12 +456,43 @@ func parseConfigFile(cf *ConfigFile, configPath string) (*Config, error) {
 	return cfg, nil
 }
 
-func toConfigFile(c *Config) *ConfigFile {
+// resolvePathValue expands value (~, environment variables) and resolves it
+// against baseDir if it is relative, returning a cleaned absolute path.
+func resolvePathValue(value, baseDir string) (string, error) {
+	expanded, err := ExpandPath(value)
+	if err != nil {
+		return "", err
+	}
+	if expanded == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(expanded) {
+		expanded = filepath.Join(baseDir, expanded)
+	}
+	return filepath.Clean(expanded), nil
+}
+
+// pathValueForSave decides which value to write back to the config file for
+// a directory setting. The original (possibly relative or ~/$VAR-based)
+// value is preserved as long as it still resolves to the current runtime
+// value; otherwise the runtime value was changed programmatically and must
+// be written out so the change is not silently discarded.
+func pathValueForSave(original, current, configDir string) string {
+	if original != "" {
+		if resolved, err := resolvePathValue(original, configDir); err == nil && resolved == filepath.Clean(current) {
+			return original
+		}
+	}
+	return current
+}
+
+func toConfigFile(c *Config, configDir string) *ConfigFile {
 	cf := &ConfigFile{}
 
-	// General config - use original values to preserve relative paths
-	cf.General.WorkDir = c.General.WorkDirOriginal
-	cf.General.CacheDir = c.General.CacheDirOriginal
+	// General config - preserve original (relative) values when they still
+	// match the runtime paths, but write programmatic changes through.
+	cf.General.WorkDir = pathValueForSave(c.General.WorkDirOriginal, c.General.WorkDir, configDir)
+	cf.General.CacheDir = pathValueForSave(c.General.CacheDirOriginal, c.General.CacheDir, configDir)
 	cf.General.Timeout = c.General.Timeout.String()
 	cf.General.DefaultBranch = c.General.DefaultBranch
 	cf.General.RecurseSubmodule = &c.General.RecurseSubmodule
@@ -476,11 +533,31 @@ func toConfigFile(c *Config) *ConfigFile {
 }
 
 // NewDefaultConfig creates a new configuration with default values.
+// If the current working directory cannot be determined, WorkDir falls back
+// to "." (it is resolved to an absolute path on save/load anyway); use
+// NewDefaultConfigE to observe the error instead.
 func NewDefaultConfig() *Config {
-	cwd, _ := os.Getwd()
+	cfg, err := NewDefaultConfigE()
+	if err != nil {
+		return newDefaultConfig(".")
+	}
+	return cfg
+}
+
+// NewDefaultConfigE creates a new configuration with default values,
+// returning an error if the current working directory cannot be determined.
+func NewDefaultConfigE() (*Config, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine working directory: %w", err)
+	}
+	return newDefaultConfig(cwd), nil
+}
+
+func newDefaultConfig(workDir string) *Config {
 	return &Config{
 		General: GeneralConfig{
-			WorkDir:          cwd,
+			WorkDir:          workDir,
 			WorkDirOriginal:  "./", // Use relative path for portability
 			Timeout:          DefaultTimeout,
 			DefaultBranch:    DefaultBranch,

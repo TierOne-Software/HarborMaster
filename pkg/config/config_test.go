@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -272,6 +273,297 @@ func TestConfig_SaveAndLoad(t *testing.T) {
 	}
 	if loaded.Repositories[0].Name != "test-repo" {
 		t.Errorf("expected 'test-repo', got '%s'", loaded.Repositories[0].Name)
+	}
+}
+
+func TestLoad_UnknownKeysRejected(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantKey string
+	}{
+		{
+			name: "misspelled general key",
+			content: `
+[general]
+default_brnach = "main"
+`,
+			wantKey: "default_brnach",
+		},
+		{
+			name: "misspelled repository table",
+			content: `
+[[repositories]]
+name = "test"
+url = "https://github.com/test/test.git"
+type = "git"
+`,
+			wantKey: "repositories",
+		},
+		{
+			name: "unknown repository key",
+			content: `
+[[repository]]
+name = "test"
+url = "https://github.com/test/test.git"
+type = "git"
+brnch = "main"
+`,
+			wantKey: "brnch",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpFile := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(tmpFile, []byte(tt.content), 0o644); err != nil {
+				t.Fatalf("failed to write temp file: %v", err)
+			}
+
+			_, err := Load(tmpFile)
+			if err == nil {
+				t.Fatal("expected error for unknown keys")
+			}
+			if !strings.Contains(err.Error(), tt.wantKey) {
+				t.Errorf("expected error to mention %q, got: %v", tt.wantKey, err)
+			}
+		})
+	}
+}
+
+func TestSaveTo_PreservesExistingFileOnError(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ConfigFileName)
+
+	cfg := NewDefaultConfig()
+	if err := cfg.SaveTo(configPath); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read config: %v", err)
+	}
+
+	// Make the directory unwritable so the save cannot create its temp file.
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; directory permissions are not enforced")
+	}
+	if err := os.Chmod(tmpDir, 0o555); err != nil {
+		t.Fatalf("failed to chmod dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(tmpDir, 0o755) })
+
+	if err := cfg.SaveTo(configPath); err == nil {
+		t.Fatal("expected save to fail in read-only directory")
+	}
+
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to re-read config: %v", err)
+	}
+	if string(after) != string(original) {
+		t.Error("existing config file was modified by a failed save")
+	}
+}
+
+func TestSaveTo_FilePermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ConfigFileName)
+
+	// New files are created 0600.
+	cfg := NewDefaultConfig()
+	if err := cfg.SaveTo(configPath); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("failed to stat config: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("expected new file mode 0600, got %o", perm)
+	}
+
+	// Existing file permissions are preserved.
+	if err := os.Chmod(configPath, 0o644); err != nil {
+		t.Fatalf("failed to chmod: %v", err)
+	}
+	if err := cfg.SaveTo(configPath); err != nil {
+		t.Fatalf("failed to re-save config: %v", err)
+	}
+	info, err = os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("failed to stat config: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Errorf("expected preserved file mode 0644, got %o", perm)
+	}
+}
+
+func TestSaveTo_NoTempFileLeftover(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ConfigFileName)
+
+	cfg := NewDefaultConfig()
+	if err := cfg.SaveTo(configPath); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to read dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != ConfigFileName {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("expected only %s in dir, got %v", ConfigFileName, names)
+	}
+}
+
+func TestSaveTo_PreservesRelativeWorkDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ConfigFileName)
+	if err := os.MkdirAll(filepath.Join(tmpDir, "ws"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	content := `
+[general]
+work_dir = "./ws"
+cache_dir = "./cache"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `work_dir = "./ws"`) {
+		t.Errorf("expected relative work_dir to be preserved, got:\n%s", data)
+	}
+	if !strings.Contains(string(data), `cache_dir = "./cache"`) {
+		t.Errorf("expected relative cache_dir to be preserved, got:\n%s", data)
+	}
+}
+
+func TestSaveTo_ProgrammaticDirChangeIsSaved(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, ConfigFileName)
+	if err := os.MkdirAll(filepath.Join(tmpDir, "ws"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	content := `
+[general]
+work_dir = "./ws"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	// Change the runtime paths programmatically.
+	newWorkDir := filepath.Join(tmpDir, "other-ws")
+	newCacheDir := filepath.Join(tmpDir, "cache")
+	cfg.General.WorkDir = newWorkDir
+	cfg.General.CacheDir = newCacheDir
+
+	if err := cfg.Save(); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	reloaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("failed to reload config: %v", err)
+	}
+	if reloaded.General.WorkDir != newWorkDir {
+		t.Errorf("expected WorkDir %q after round-trip, got %q", newWorkDir, reloaded.General.WorkDir)
+	}
+	if reloaded.General.CacheDir != newCacheDir {
+		t.Errorf("expected CacheDir %q after round-trip, got %q", newCacheDir, reloaded.General.CacheDir)
+	}
+}
+
+func TestLoad_RelativePathSurvivesChdir(t *testing.T) {
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, ConfigFileName)
+
+	cfg := NewDefaultConfig()
+	if err := cfg.SaveTo(configPath); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+	// Load via a relative path...
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(ConfigFileName)
+	if err != nil {
+		t.Fatalf("failed to load config via relative path: %v", err)
+	}
+	if !filepath.IsAbs(loaded.Path()) {
+		t.Errorf("expected Path() to be absolute, got %q", loaded.Path())
+	}
+
+	// ...then chdir elsewhere and save: it must write to the original file,
+	// not to a new file in the new working directory.
+	otherDir := t.TempDir()
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatal(err)
+	}
+	loaded.General.DefaultBranch = "trunk"
+	if err := loaded.Save(); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(otherDir, ConfigFileName)); !os.IsNotExist(err) {
+		t.Error("save after chdir wrote to the new working directory")
+	}
+	reloaded, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("failed to reload config: %v", err)
+	}
+	if reloaded.General.DefaultBranch != "trunk" {
+		t.Errorf("expected saved change to land in original file, got branch %q", reloaded.General.DefaultBranch)
+	}
+}
+
+func TestNewDefaultConfigE(t *testing.T) {
+	cfg, err := NewDefaultConfigE()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.General.WorkDir != cwd {
+		t.Errorf("expected WorkDir %q, got %q", cwd, cfg.General.WorkDir)
 	}
 }
 
