@@ -29,6 +29,7 @@ func setupWorkWorkspace(t *testing.T, n int) (*config.Config, *RepositoryManager
 		gitCmd(t, repoDir, "init")
 		gitCmd(t, repoDir, "config", "user.email", "test@test.com")
 		gitCmd(t, repoDir, "config", "user.name", "Test User")
+		gitCmd(t, repoDir, "config", "commit.gpgSign", "false")
 		addCommit(t, repoDir, "README.md", "# "+name)
 
 		repos = append(repos, config.Repository{

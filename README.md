@@ -96,6 +96,32 @@ hm sync [repository...] [flags]
 | `--parallel` | Concurrent operations (default: 4) |
 | `--dry-run` | Show what would be synced |
 
+### lock
+
+Update the lock file without touching repository checkouts.
+
+```bash
+hm lock update [repository...] [flags]   # Pin to latest commit on the configured branch
+hm lock adopt [repository...] [flags]    # Pin to the current local HEAD
+```
+
+`update` resolves each repository's configured branch against its remote
+(`git ls-remote`) and records the tip commit. Repositories whose config pins
+a commit or tag are skipped.
+
+`adopt` records each repository's current local HEAD — for example after
+committing and pushing from within a checkout. A HEAD that has not been
+pushed to origin cannot be reproduced by `hm sync --locked` elsewhere, so it
+is refused unless `--force` is given.
+
+| Flag | Description |
+|------|-------------|
+| `-p, --project` | Apply to repositories in a project |
+| `-t, --tag` | Apply to repositories with a tag |
+| `--dry-run` | Show what would change without writing the lock file |
+| `--sync` | (`update` only) Also check out the new pins afterwards |
+| `--force` | (`adopt` only) Pin a HEAD that has not been pushed to origin |
+
 ### status
 
 Show repository status.
@@ -272,6 +298,8 @@ tags = ["production"]
 
 Harbormaster maintains a lock file (`.harbormaster.lock`) that records exact commit SHAs for reproducible syncs. Use `hm sync --locked` to sync to the locked state.
 
+Update the pins with `hm lock update` (latest commit on each configured branch) or `hm lock adopt` (current local HEAD); neither touches your checkouts. A plain `hm sync` also refreshes the lock file as a side effect of syncing.
+
 ## Examples
 
 ```bash
@@ -295,6 +323,12 @@ hm sync --dry-run
 
 # Reproducible sync using lock file
 hm sync --locked
+
+# Bump a pin to the latest commit on its branch (checkout untouched)
+hm lock update cports
+
+# Record the local HEAD you just committed and pushed
+hm lock adopt cragutils
 
 # Create a project with initial repositories
 hm project add backend --repos=api,database --tags=production

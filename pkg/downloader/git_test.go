@@ -60,6 +60,10 @@ func setupTestGitRepo(t *testing.T) string {
 		{"git", "init"},
 		{"git", "config", "user.email", "test@test.com"},
 		{"git", "config", "user.name", "Test User"},
+		// Tests must not depend on the developer's global git config; a
+		// global commit.gpgSign=true would otherwise block test commits on
+		// a pinentry prompt.
+		{"git", "config", "commit.gpgSign", "false"},
 	}
 
 	for _, cmd := range commands {

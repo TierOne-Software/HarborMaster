@@ -333,14 +333,7 @@ func (m *RepositoryManager) updateLockFile(results []types.OperationResult) {
 			continue
 		}
 
-		requestedRef := repo.GetEffectiveRef(m.config.General.DefaultBranch)
-		entry := lockfile.NewEntry(
-			repo.URL,
-			string(repo.Type),
-			requestedRef,
-			result.CommitSHA,
-		)
-		m.lockFile.Update(result.RepoName, entry)
+		m.updateLockEntry(repo, result.CommitSHA)
 	}
 }
 

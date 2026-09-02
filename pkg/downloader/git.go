@@ -548,6 +548,45 @@ func GetCurrentBranch(path string) (string, error) {
 	return branch, nil
 }
 
+// ResolveRemoteRef returns the commit SHA that ref points at on the remote,
+// without needing a local clone. ref should be a fully-qualified ref such as
+// "refs/heads/main". The URL may carry credentials; they are scrubbed from
+// any error message.
+func ResolveRemoteRef(url, ref string) (string, error) {
+	if err := validateRef(ref); err != nil {
+		return "", err
+	}
+	cmd := exec.Command("git", "ls-remote", url, ref)
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve %s on remote: %w", ref, err)
+	}
+	// Output is "<sha>	<ref>" per matching line; we queried one exact ref.
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == ref {
+			return fields[0], nil
+		}
+	}
+	return "", fmt.Errorf("ref %s not found on remote %s", ref, scrubCredentials(url))
+}
+
+// RemoteContains reports whether any remote-tracking ref in the repository
+// at path contains the given commit — i.e. whether the commit has been
+// published to a remote this clone knows about.
+func RemoteContains(path, commit string) (bool, error) {
+	if err := validateRef(commit); err != nil {
+		return false, err
+	}
+	cmd := exec.Command("git", "branch", "-r", "--contains", commit)
+	cmd.Dir = path
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("failed to check remote containment: %w", err)
+	}
+	return strings.TrimSpace(string(output)) != "", nil
+}
+
 // Exists returns true if the destination exists.
 func Exists(path string) bool {
 	_, err := os.Stat(path)
