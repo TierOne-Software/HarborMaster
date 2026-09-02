@@ -22,6 +22,7 @@ func setupRepoWithBareOrigin(t *testing.T) (workDir, bareDir string) {
 	gitRun(t, t.TempDir(), "clone", bareDir, workDir)
 	gitRun(t, workDir, "config", "user.email", "test@test.com")
 	gitRun(t, workDir, "config", "user.name", "Test User")
+	gitRun(t, workDir, "config", "commit.gpgSign", "false")
 
 	return workDir, bareDir
 }

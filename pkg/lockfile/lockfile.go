@@ -87,7 +87,7 @@ func (lf *LockFile) Save(path string) error {
 		// Write header comment
 		header := "# Harbormaster Lock File\n" +
 			"# DO NOT EDIT - This file is auto-generated\n" +
-			"# Use 'hm sync' to update\n\n"
+			"# Use 'hm lock update', 'hm lock adopt', or 'hm sync' to update\n\n"
 		if _, err := f.WriteString(header); err != nil {
 			return err
 		}

@@ -917,7 +917,7 @@ func TestE2E_Help(t *testing.T) {
 
 	stdout := mustRun(t, workDir, "--help")
 
-	expectedCommands := []string{"init", "sync", "status", "list", "add", "remove", "work", "project"}
+	expectedCommands := []string{"init", "sync", "status", "list", "add", "remove", "work", "project", "lock"}
 	for _, cmd := range expectedCommands {
 		if !strings.Contains(stdout, cmd) {
 			t.Errorf("expected '%s' in help output", cmd)
@@ -943,5 +943,104 @@ func TestE2E_NoColorFlag(t *testing.T) {
 	stdout := mustRun(t, workDir, "--no-color", "status")
 	if strings.Contains(stdout, "\x1b[") {
 		t.Errorf("expected no ANSI escapes with --no-color, got: %q", stdout)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// lock
+// ---------------------------------------------------------------------------
+
+func lockFileContains(t *testing.T, workDir, sha string) bool {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(workDir, ".harbormaster.lock"))
+	if err != nil {
+		t.Fatalf("failed to read lock file: %v", err)
+	}
+	return strings.Contains(string(content), sha)
+}
+
+func TestE2E_LockUpdate(t *testing.T) {
+	requireGit(t)
+	workDir := t.TempDir()
+	sourceDir := setupSyncedWorkspace(t, workDir, "repo")
+	checkoutDir := filepath.Join(workDir, "repo")
+	syncedSHA := gitIn(t, checkoutDir, "rev-parse", "HEAD")
+
+	// Advance the source branch.
+	commitFileIn(t, sourceDir, "new.txt", "new content")
+	newSHA := gitIn(t, sourceDir, "rev-parse", "HEAD")
+
+	// --dry-run reports the change but does not write the lock file.
+	stdout := mustRun(t, workDir, "lock", "update", "--dry-run")
+	if !strings.Contains(stdout, "Dry run") {
+		t.Errorf("expected dry-run notice, got: %s", stdout)
+	}
+	if lockFileContains(t, workDir, newSHA) {
+		t.Error("dry-run must not write the new SHA to the lock file")
+	}
+
+	// The real run updates the lock file but not the checkout.
+	stdout = mustRun(t, workDir, "lock", "update")
+	if !strings.Contains(stdout, "->") {
+		t.Errorf("expected old -> new output, got: %s", stdout)
+	}
+	if !lockFileContains(t, workDir, newSHA) {
+		t.Error("expected lock file to contain the new branch tip")
+	}
+	if got := gitIn(t, checkoutDir, "rev-parse", "HEAD"); got != syncedSHA {
+		t.Errorf("lock update moved the checkout to %s, want untouched %s", got, syncedSHA)
+	}
+
+	// Status now reports drift: checkout behind the lock.
+	stdout = mustRun(t, workDir, "status")
+	if !strings.Contains(stdout, "drift") {
+		t.Errorf("expected drift after lock update, got: %s", stdout)
+	}
+
+	// --sync moves the checkout to the new pin.
+	mustRun(t, workDir, "lock", "update", "--sync", "--quiet")
+	if got := gitIn(t, checkoutDir, "rev-parse", "HEAD"); got != newSHA {
+		t.Errorf("lock update --sync left checkout at %s, want %s", got, newSHA)
+	}
+}
+
+func TestE2E_LockAdopt(t *testing.T) {
+	requireGit(t)
+	workDir := t.TempDir()
+	setupSyncedWorkspace(t, workDir, "repo")
+	checkoutDir := filepath.Join(workDir, "repo")
+
+	// Commit locally without pushing.
+	commitFileIn(t, checkoutDir, "local.txt", "local content")
+	localSHA := gitIn(t, checkoutDir, "rev-parse", "HEAD")
+
+	// Unpushed HEAD is refused without --force.
+	_, stderr, err := runCommand(t, workDir, "lock", "adopt")
+	if err == nil {
+		t.Error("expected 'lock adopt' to refuse an unpushed HEAD")
+	}
+	if !strings.Contains(stderr, "--force") {
+		t.Errorf("expected refusal to mention --force, got: %s", stderr)
+	}
+	if lockFileContains(t, workDir, localSHA) {
+		t.Error("lock file must not change when adopt is refused")
+	}
+
+	// --force pins the local HEAD, with a warning.
+	_, stderr, err = runCommand(t, workDir, "lock", "adopt", "--force")
+	if err != nil {
+		t.Fatalf("lock adopt --force failed: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stderr, "warning") {
+		t.Errorf("expected a warning when force-adopting an unpushed HEAD, got: %s", stderr)
+	}
+	if !lockFileContains(t, workDir, localSHA) {
+		t.Error("expected lock file to contain the local HEAD SHA")
+	}
+
+	// Status agrees the checkout matches the lock.
+	stdout := mustRun(t, workDir, "status")
+	if !strings.Contains(stdout, "locked") {
+		t.Errorf("expected locked status after adopt, got: %s", stdout)
 	}
 }
