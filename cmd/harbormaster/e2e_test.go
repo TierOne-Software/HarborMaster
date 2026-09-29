@@ -440,6 +440,40 @@ func TestE2E_Add_InvalidTypeRejected(t *testing.T) {
 	mustRun(t, workDir, "status")
 }
 
+func TestE2E_Add_WithProject(t *testing.T) {
+	workDir := t.TempDir()
+
+	mustRun(t, workDir, "init")
+	mustRun(t, workDir, "project", "add", "viu")
+
+	stdout := mustRun(t, workDir, "add",
+		"https://github.com/test/repo.git",
+		"--name", "new-repo",
+		"--project", "viu")
+	if !strings.Contains(stdout, "Projects: viu") {
+		t.Errorf("expected project membership in output, got: %s", stdout)
+	}
+
+	stdout = mustRun(t, workDir, "list", "projects")
+	if !strings.Contains(stdout, "new-repo") {
+		t.Errorf("expected 'new-repo' in project listing, got: %s", stdout)
+	}
+
+	// An unknown project must abort the whole add: the repository must not
+	// be persisted either.
+	_, _, err := runCommand(t, workDir, "add",
+		"https://github.com/test/other.git",
+		"--name", "other-repo",
+		"--project", "no-such-project")
+	if err == nil {
+		t.Error("expected 'add --project' with an unknown project to fail")
+	}
+	stdout = mustRun(t, workDir, "list", "repos")
+	if strings.Contains(stdout, "other-repo") {
+		t.Error("repository was persisted despite the unknown project")
+	}
+}
+
 func TestE2E_Remove(t *testing.T) {
 	workDir := t.TempDir()
 

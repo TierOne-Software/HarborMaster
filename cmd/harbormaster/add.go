@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/tierone/harbormaster/pkg/config"
@@ -10,14 +11,15 @@ import (
 )
 
 var (
-	addName   string
-	addType   string
-	addBranch string
-	addTag    string
-	addCommit string
-	addPath   string
-	addSync   bool
-	addTags   []string
+	addName     string
+	addType     string
+	addBranch   string
+	addTag      string
+	addCommit   string
+	addPath     string
+	addSync     bool
+	addTags     []string
+	addProjects []string
 )
 
 var addCmd = &cobra.Command{
@@ -43,6 +45,9 @@ func init() {
 	addCmd.Flags().StringVarP(&addPath, "path", "p", "", "local path (relative to work_dir)")
 	addCmd.Flags().BoolVar(&addSync, "sync", false, "sync immediately after adding")
 	addCmd.Flags().StringSliceVar(&addTags, "tags", nil, "tags for filtering")
+	// No shorthand: -p is --path on this command, and abbreviating --project
+	// here would collide with it.
+	addCmd.Flags().StringSliceVar(&addProjects, "project", nil, "project(s) to add the repository to (comma-separated; must already exist)")
 
 	_ = addCmd.MarkFlagRequired("name") // Safe to ignore - panics caught at startup
 	rootCmd.AddCommand(addCmd)
@@ -98,6 +103,15 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Attach to any requested projects before saving: an unknown project
+	// aborts the whole add and nothing is persisted. Projects are never
+	// auto-created — a typo'd flag must not silently fork the grouping.
+	for _, project := range addProjects {
+		if err := mgr.AddRepoToProject(project, repo.Name); err != nil {
+			return fmt.Errorf("failed to add repository to project: %w", err)
+		}
+	}
+
 	// Validate and save config. Validation catches bad input (e.g. an
 	// invalid --type) before it is persisted and bricks the workspace.
 	if err := saveConfigValidated(); err != nil {
@@ -109,6 +123,9 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  URL:  %s\n", repo.URL)
 		fmt.Printf("  Type: %s\n", repo.Type)
 		fmt.Printf("  Path: %s\n", repo.Path)
+		if len(addProjects) > 0 {
+			fmt.Printf("  Projects: %s\n", strings.Join(addProjects, ", "))
+		}
 	}
 
 	// Sync if requested

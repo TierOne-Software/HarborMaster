@@ -58,13 +58,14 @@ hm add <url> [flags]
 | Flag | Description |
 |------|-------------|
 | `-n, --name` | Repository name (required) |
-| `-t, --type` | Repository type: `git` or `http` (auto-detected) |
+| `--type` | Repository type: `git` or `http` (auto-detected) |
 | `-b, --branch` | Git branch to track |
 | `--tag` | Git tag to track |
 | `--commit` | Git commit SHA to pin |
 | `-p, --path` | Local path (relative to work_dir) |
 | `--sync` | Sync immediately after adding |
 | `--tags` | Tags for filtering (comma-separated) |
+| `--project` | Existing project(s) to add the repository to (comma-separated) |
 
 ### remove
 
