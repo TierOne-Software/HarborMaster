@@ -102,6 +102,13 @@ func (g *GitDownloader) download(source, destination string, progress chan types
 		return "", err
 	}
 
+	// The clone initialized submodules for the remote tip; after checking
+	// out a pinned commit (locked sync), the gitlinks may point elsewhere —
+	// resynchronize so the tree actually matches the pin.
+	if err := g.updateSubmodules(destination, progress); err != nil {
+		return "", err
+	}
+
 	return GetHeadSHA(destination)
 }
 
@@ -217,7 +224,12 @@ func (g *GitDownloader) update(destination string, progress chan types.ProgressU
 // porcelain status.
 func (g *GitDownloader) updateSubmodules(destination string, progress chan types.ProgressUpdate) error {
 	if _, err := os.Stat(filepath.Join(destination, ".gitmodules")); err != nil {
-		return nil // no submodules in this commit
+		if os.IsNotExist(err) {
+			return nil // no submodules in this commit
+		}
+		// Permission, symlink-loop, or I/O errors must not silently skip
+		// synchronization and report success with stale submodules.
+		return fmt.Errorf("failed to check for submodules: %w", err)
 	}
 
 	if !g.options.Submodules {
@@ -609,8 +621,8 @@ func ResolveRemoteRef(url, ref string) (string, error) {
 
 // CheckSubmodules returns the paths of submodules whose checkout does not
 // match the superproject's recorded gitlink — uninitialized ('-' prefix in
-// git submodule status) or checked out at a different commit ('+' prefix).
-// An up-to-date tree yields an empty slice.
+// git submodule status), checked out at a different commit ('+'), or in a
+// merge-conflicted state ('U'). An up-to-date tree yields an empty slice.
 func CheckSubmodules(path string) ([]string, error) {
 	cmd := exec.Command("git", "submodule", "status", "--recursive")
 	cmd.Dir = path
@@ -618,20 +630,27 @@ func CheckSubmodules(path string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get submodule status: %w", err)
 	}
+	return parseSubmoduleStatus(string(output)), nil
+}
+
+// parseSubmoduleStatus extracts the paths of non-clean submodules from
+// 'git submodule status' output.
+func parseSubmoduleStatus(output string) []string {
 	var mismatched []string
-	for _, line := range strings.Split(strings.TrimRight(string(output), "\n"), "\n") {
+	for _, line := range strings.Split(strings.TrimRight(output, "\n"), "\n") {
 		if line == "" {
 			continue
 		}
 		// Format: <status><sha> <path> [(describe)]; ' ' means clean.
-		if line[0] == '+' || line[0] == '-' {
+		switch line[0] {
+		case '+', '-', 'U':
 			fields := strings.Fields(line[1:])
 			if len(fields) >= 2 {
 				mismatched = append(mismatched, fields[1])
 			}
 		}
 	}
-	return mismatched, nil
+	return mismatched
 }
 
 // RemoteContains reports whether any remote-tracking ref in the repository

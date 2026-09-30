@@ -1,8 +1,10 @@
 package downloader
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -36,6 +38,51 @@ func allowFileTransport(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
 	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+}
+
+func TestParseSubmoduleStatus(t *testing.T) {
+	out := parseSubmoduleStatus(
+		" 1234567890abcdef1234567890abcdef12345678 clean (heads/main)\n" +
+			"-2234567890abcdef1234567890abcdef12345678 not-init\n" +
+			"+3234567890abcdef1234567890abcdef12345678 moved (heads/main~2)\n" +
+			"U4234567890abcdef1234567890abcdef12345678 conflicted\n" +
+			"\n",
+	)
+	want := []string{"not-init", "moved", "conflicted"}
+	if len(out) != len(want) {
+		t.Fatalf("parseSubmoduleStatus = %v, want %v", out, want)
+	}
+	for i := range want {
+		if out[i] != want[i] {
+			t.Errorf("parseSubmoduleStatus[%d] = %q, want %q", i, out[i], want[i])
+		}
+	}
+
+	if got := parseSubmoduleStatus(""); len(got) != 0 {
+		t.Errorf("expected no mismatches for empty output, got %v", got)
+	}
+	if got := parseSubmoduleStatus(" 1234567890abcdef1234567890abcdef12345678 clean\n"); len(got) != 0 {
+		t.Errorf("expected no mismatches for clean submodule, got %v", got)
+	}
+}
+
+// A .gitmodules that cannot be stat'ed (here: a symlink loop) must surface
+// an error, not silently skip submodule synchronization.
+func TestUpdateSubmodules_StatErrorPropagates(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, ".gitmodules")
+	if err := os.Symlink(".gitmodules", link); err != nil {
+		t.Fatalf("failed to create symlink loop: %v", err)
+	}
+
+	dl := NewGitDownloader(Options{Submodules: true})
+	err := dl.updateSubmodules(dir, nil)
+	if err == nil {
+		t.Fatal("expected an error for an unreadable .gitmodules")
+	}
+	if !strings.Contains(err.Error(), "failed to check for submodules") {
+		t.Errorf("unexpected error: %v", err)
+	}
 }
 
 func TestGitDownloader_Update_SubmodulesFollowGitlinks(t *testing.T) {

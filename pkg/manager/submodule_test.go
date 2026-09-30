@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -61,6 +62,20 @@ func TestSync_LockedMode_SubmodulesVerified(t *testing.T) {
 	}
 	if got := headSHA(t, filepath.Join(repoPath, "sub")); got != subSHA1 {
 		t.Errorf("locked sync submodule at %s, want locked gitlink %s", got, subSHA1)
+	}
+
+	// A fresh clone directly in locked mode must land the submodule on the
+	// locked gitlink too: the clone initializes submodules for the remote
+	// tip, which has moved past the pin.
+	if err := os.RemoveAll(repoPath); err != nil {
+		t.Fatalf("failed to remove clone: %v", err)
+	}
+	freshResult, err := lockedMgr.Sync(Filter{All: true})
+	if err != nil || freshResult.FailureCount != 0 {
+		t.Fatalf("locked fresh-clone sync failed: %v %+v", err, freshResult.FailedResults())
+	}
+	if got := headSHA(t, filepath.Join(repoPath, "sub")); got != subSHA1 {
+		t.Errorf("locked fresh clone submodule at %s, want locked gitlink %s", got, subSHA1)
 	}
 
 	// Normal sync: the superproject moves and the submodule follows.
