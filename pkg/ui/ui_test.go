@@ -80,6 +80,45 @@ func TestSummarizeOperations(t *testing.T) {
 	}
 }
 
+func TestModel_RunningOperationShowsMessageNotBar(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	// A mid-clone update carrying a parsed percentage, as the git
+	// downloader produces for every phase and submodule.
+	m.updateOperation(ProgressMsg(CreateProgressMsgWithPercent(
+		"f5-bbb-os", "url", types.PhaseFetching, 42, "Cloning into 'external/f5-iot-bbb'...",
+	)))
+
+	op := m.operations["f5-bbb-os"]
+	line := m.renderOperation(op)
+
+	if !strings.Contains(line, "Cloning into 'external/f5-iot-bbb'...") {
+		t.Errorf("expected the activity message in the rendered line, got: %q", line)
+	}
+	if !strings.Contains(line, string(types.PhaseFetching)) {
+		t.Errorf("expected the phase label in the rendered line, got: %q", line)
+	}
+	// The bubbles progress bar renders block glyphs; none may appear.
+	if strings.ContainsAny(line, "█░") {
+		t.Errorf("expected no progress bar glyphs, got: %q", line)
+	}
+}
+
+func TestModel_MessageTruncatedToWidth(t *testing.T) {
+	m := NewModel()
+	m.width = 60
+	long := strings.Repeat("x", 200)
+	m.updateOperation(ProgressMsg(CreateProgressMsg("repo", "url", types.PhaseFetching, long)))
+
+	line := m.renderOperation(m.operations["repo"])
+	if strings.Contains(line, long) {
+		t.Error("expected the message to be truncated to the terminal width")
+	}
+	if !strings.Contains(line, "...") {
+		t.Errorf("expected truncation ellipsis, got: %q", line)
+	}
+}
+
 func TestModel_FailedOperationRendersAsError(t *testing.T) {
 	m := NewModel()
 	m.updateOperation(ProgressMsg(CreateErrorMsg("repo1", "https://example.com/repo1.git", errors.New("clone exploded"))))
