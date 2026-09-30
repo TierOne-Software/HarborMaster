@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/tierone/harbormaster/pkg/types"
 )
 
@@ -219,24 +220,18 @@ func (m *Model) renderOperation(op *operationState) string {
 		phase := PhaseColor(string(op.phase)).Render(string(op.phase))
 		b.WriteString(phase)
 		if op.message != "" {
-			b.WriteString(" ")
-			b.WriteString(MutedStyle.Render(truncate(op.message, m.messageWidth())))
+			// Measure the already-rendered prefix (symbol, padded name,
+			// phase) rather than guessing a constant, and omit the message
+			// entirely when not even a truncated fragment fits.
+			remaining := m.width - lipgloss.Width(b.String()) - 1
+			if remaining >= 2 {
+				b.WriteString(" ")
+				b.WriteString(MutedStyle.Render(truncate(op.message, remaining)))
+			}
 		}
 	}
 
 	return b.String()
-}
-
-// messageWidth returns how many columns are available for the activity
-// message after the symbol, repository name, and phase label.
-func (m *Model) messageWidth() int {
-	// symbol(2) + name(28) + space + longest phase label ("initializing") + space
-	const reserved = 2 + 28 + 1 + 12 + 1
-	w := m.width - reserved
-	if w < 10 {
-		return 10
-	}
-	return w
 }
 
 func (m *Model) getSymbol(op *operationState) string {
@@ -268,11 +263,31 @@ func (m *Model) renderSummary() string {
 	return b.String()
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
+// truncate shortens s to at most maxCells display cells, appending an
+// ellipsis when truncating. It is rune-safe (never splits a UTF-8 sequence)
+// and width-aware (East Asian wide characters count as two cells), so
+// non-ASCII repository and submodule paths render correctly.
+func truncate(s string, maxCells int) string {
+	if maxCells <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(s) <= maxCells {
 		return s
 	}
-	return s[:max-3] + "..."
+	if maxCells == 1 {
+		return "…"
+	}
+	var b strings.Builder
+	w := 0
+	for _, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if w+rw > maxCells-1 { // reserve one cell for the ellipsis
+			break
+		}
+		b.WriteRune(r)
+		w += rw
+	}
+	return b.String() + "…"
 }
 
 // SendProgress sends a progress message to the program.

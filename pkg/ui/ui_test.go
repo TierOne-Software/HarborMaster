@@ -8,7 +8,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/tierone/harbormaster/pkg/types"
 )
 
@@ -114,8 +117,60 @@ func TestModel_MessageTruncatedToWidth(t *testing.T) {
 	if strings.Contains(line, long) {
 		t.Error("expected the message to be truncated to the terminal width")
 	}
-	if !strings.Contains(line, "...") {
+	if !strings.Contains(line, "…") {
 		t.Errorf("expected truncation ellipsis, got: %q", line)
+	}
+	if got := lipgloss.Width(line); got > m.width {
+		t.Errorf("rendered line is %d cells, exceeds width %d: %q", got, m.width, line)
+	}
+}
+
+// A narrow terminal that cannot fit even a truncated message fragment must
+// omit the message entirely rather than overflow the width.
+func TestModel_MessageOmittedWhenNoRoom(t *testing.T) {
+	// The rendered prefix (symbol, 30-cell padded name, "initializing"
+	// phase label) is 45 cells; at width 46 there is no room for even a
+	// truncated message fragment.
+	m := NewModel()
+	m.width = 46
+	m.updateOperation(ProgressMsg(CreateProgressMsg(
+		"repo", "url", types.PhaseInit, "Cloning into 'external/foo'...",
+	)))
+
+	line := m.renderOperation(m.operations["repo"])
+	if strings.Contains(line, "Cloning") {
+		t.Errorf("expected message to be omitted in a narrow terminal, got: %q", line)
+	}
+	if got := lipgloss.Width(line); got > m.width {
+		t.Errorf("rendered line is %d cells, exceeds width %d: %q", got, m.width, line)
+	}
+}
+
+func TestTruncate_RuneSafeAndCellAware(t *testing.T) {
+	// Multi-byte runes must never be split: a byte-based cut of this path
+	// at cell 10 would land inside 'é' or '中'.
+	in := "Cloning into 'externel/é中/sub'..."
+	for max := 1; max < len(in); max++ {
+		out := truncate(in, max)
+		if !strings.HasSuffix(out, "…") && out != in {
+			t.Errorf("truncate(%q, %d) = %q: expected ellipsis or passthrough", in, max, out)
+		}
+		if !utf8.ValidString(out) {
+			t.Errorf("truncate(%q, %d) = %q: invalid UTF-8", in, max, out)
+		}
+		if w := runewidth.StringWidth(out); w > max {
+			t.Errorf("truncate(%q, %d) is %d cells wide", in, max, w)
+		}
+	}
+
+	if got := truncate("short", 10); got != "short" {
+		t.Errorf("expected passthrough, got %q", got)
+	}
+	if got := truncate("anything", 1); got != "…" {
+		t.Errorf("expected bare ellipsis at width 1, got %q", got)
+	}
+	if got := truncate("anything", 0); got != "" {
+		t.Errorf("expected empty at width 0, got %q", got)
 	}
 }
 
