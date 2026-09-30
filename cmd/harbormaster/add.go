@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/tierone/harbormaster/pkg/config"
@@ -10,14 +11,15 @@ import (
 )
 
 var (
-	addName   string
-	addType   string
-	addBranch string
-	addTag    string
-	addCommit string
-	addPath   string
-	addSync   bool
-	addTags   []string
+	addName     string
+	addType     string
+	addBranch   string
+	addTag      string
+	addCommit   string
+	addPath     string
+	addSync     bool
+	addTags     []string
+	addProjects []string
 )
 
 var addCmd = &cobra.Command{
@@ -33,7 +35,7 @@ repository after adding.`,
 }
 
 func init() {
-	addCmd.Flags().StringVarP(&addName, "name", "n", "", "repository name (required)")
+	addCmd.Flags().StringVarP(&addName, "name", "n", "", "repository name (default: derived from the URL)")
 	// Note: --type deliberately has no shorthand; -t means --tag elsewhere
 	// in the CLI and binding it to --type here would be a trap.
 	addCmd.Flags().StringVar(&addType, "type", "", "repository type (git or http)")
@@ -43,13 +45,25 @@ func init() {
 	addCmd.Flags().StringVarP(&addPath, "path", "p", "", "local path (relative to work_dir)")
 	addCmd.Flags().BoolVar(&addSync, "sync", false, "sync immediately after adding")
 	addCmd.Flags().StringSliceVar(&addTags, "tags", nil, "tags for filtering")
+	// No shorthand: -p is --path on this command, and abbreviating --project
+	// here would collide with it.
+	addCmd.Flags().StringSliceVar(&addProjects, "project", nil, "project(s) to add the repository to (comma-separated; must already exist)")
 
-	_ = addCmd.MarkFlagRequired("name") // Safe to ignore - panics caught at startup
 	rootCmd.AddCommand(addCmd)
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
 	url := args[0]
+
+	// Default the repository name from the URL when --name is not given.
+	nameDerived := false
+	if addName == "" {
+		addName = downloader.RepoNameFromURL(url)
+		if addName == "" {
+			return fmt.Errorf("could not derive a repository name from %q; pass --name", url)
+		}
+		nameDerived = true
+	}
 
 	// Determine type
 	repoType := config.RepositoryType(addType)
@@ -98,6 +112,15 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Attach to any requested projects before saving: an unknown project
+	// aborts the whole add and nothing is persisted. Projects are never
+	// auto-created — a typo'd flag must not silently fork the grouping.
+	for _, project := range addProjects {
+		if err := mgr.AddRepoToProject(project, repo.Name); err != nil {
+			return fmt.Errorf("failed to add repository to project: %w", err)
+		}
+	}
+
 	// Validate and save config. Validation catches bad input (e.g. an
 	// invalid --type) before it is persisted and bricks the workspace.
 	if err := saveConfigValidated(); err != nil {
@@ -106,9 +129,15 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	if !quiet {
 		fmt.Printf("Added repository: %s\n", repo.Name)
+		if nameDerived {
+			fmt.Println("  (name derived from URL; use --name to override)")
+		}
 		fmt.Printf("  URL:  %s\n", repo.URL)
 		fmt.Printf("  Type: %s\n", repo.Type)
 		fmt.Printf("  Path: %s\n", repo.Path)
+		if len(addProjects) > 0 {
+			fmt.Printf("  Projects: %s\n", strings.Join(addProjects, ", "))
+		}
 	}
 
 	// Sync if requested

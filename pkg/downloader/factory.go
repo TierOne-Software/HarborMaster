@@ -53,6 +53,31 @@ func NewFromRepository(repo *config.Repository, cfg *config.Config) (Downloader,
 	return New(repo.Type, opts)
 }
 
+// RepoNameFromURL derives a repository name from a URL: the last path
+// segment with any ".git" suffix stripped. Handles SCP-style git URLs
+// ("git@host:org/repo.git"), standard URLs, and plain paths. Returns ""
+// when no usable name can be derived.
+func RepoNameFromURL(url string) string {
+	// Strip query string and fragment, then any trailing slash.
+	name := url
+	if i := strings.IndexAny(name, "?#"); i >= 0 {
+		name = name[:i]
+	}
+	name = strings.TrimSuffix(name, "/")
+
+	// Last segment, treating ':' as a separator too for SCP-style URLs
+	// with no '/' after the host ("git@host:repo.git").
+	if i := strings.LastIndexAny(name, "/:"); i >= 0 {
+		name = name[i+1:]
+	}
+
+	name = strings.TrimSuffix(name, ".git")
+	if name == "" || name == "." || name == ".." {
+		return ""
+	}
+	return name
+}
+
 // DetectType attempts to detect the repository type from the URL.
 func DetectType(url string) config.RepositoryType {
 	// Unambiguous git URL schemes.
