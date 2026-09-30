@@ -96,6 +96,12 @@ hm sync [repository...] [flags]
 | `--parallel` | Concurrent operations (default: 4) |
 | `--dry-run` | Show what would be synced |
 
+Submodules: when a repository has submodules enabled (the default), both
+clone and update synchronize submodule checkouts to the gitlinks recorded in
+the checked-out commit (`git submodule update --init --recursive --force`).
+With `--locked`, submodule checkouts are additionally verified against the
+locked commit's gitlinks and a mismatch fails the sync.
+
 ### lock
 
 Update the lock file without touching repository checkouts.

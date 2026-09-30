@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/tierone/harbormaster/pkg/config"
@@ -300,6 +301,26 @@ func (m *RepositoryManager) syncRepository(repo *config.Repository) types.Operat
 			m.ui.SendProgress(ui.CreateErrorMsg(repo.Name, repo.URL, result.Error))
 		}
 		return result
+	}
+
+	// In locked mode also verify submodule checkouts match the recorded
+	// gitlinks. The update path runs submodule update, so a mismatch here
+	// means the tree could not be brought to the locked state.
+	if m.locked && targetSHA != "" && repo.Type == config.RepoTypeGit &&
+		repo.HasSubmodules(m.config.General.RecurseSubmodule) {
+		mismatched, subErr := downloader.CheckSubmodules(repoPath)
+		if subErr != nil {
+			result.Error = fmt.Errorf("failed to verify submodules: %w", subErr)
+		} else if len(mismatched) > 0 {
+			result.Error = fmt.Errorf("submodules not at locked commits: %s", strings.Join(mismatched, ", "))
+		}
+		if result.Error != nil {
+			result.Duration = time.Since(startTime)
+			if m.ui != nil {
+				m.ui.SendProgress(ui.CreateErrorMsg(repo.Name, repo.URL, result.Error))
+			}
+			return result
+		}
 	}
 
 	result.Success = true
