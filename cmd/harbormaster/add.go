@@ -35,7 +35,7 @@ repository after adding.`,
 }
 
 func init() {
-	addCmd.Flags().StringVarP(&addName, "name", "n", "", "repository name (required)")
+	addCmd.Flags().StringVarP(&addName, "name", "n", "", "repository name (default: derived from the URL)")
 	// Note: --type deliberately has no shorthand; -t means --tag elsewhere
 	// in the CLI and binding it to --type here would be a trap.
 	addCmd.Flags().StringVar(&addType, "type", "", "repository type (git or http)")
@@ -49,12 +49,21 @@ func init() {
 	// here would collide with it.
 	addCmd.Flags().StringSliceVar(&addProjects, "project", nil, "project(s) to add the repository to (comma-separated; must already exist)")
 
-	_ = addCmd.MarkFlagRequired("name") // Safe to ignore - panics caught at startup
 	rootCmd.AddCommand(addCmd)
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
 	url := args[0]
+
+	// Default the repository name from the URL when --name is not given.
+	nameDerived := false
+	if addName == "" {
+		addName = downloader.RepoNameFromURL(url)
+		if addName == "" {
+			return fmt.Errorf("could not derive a repository name from %q; pass --name", url)
+		}
+		nameDerived = true
+	}
 
 	// Determine type
 	repoType := config.RepositoryType(addType)
@@ -120,6 +129,9 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 	if !quiet {
 		fmt.Printf("Added repository: %s\n", repo.Name)
+		if nameDerived {
+			fmt.Println("  (name derived from URL; use --name to override)")
+		}
 		fmt.Printf("  URL:  %s\n", repo.URL)
 		fmt.Printf("  Type: %s\n", repo.Type)
 		fmt.Printf("  Path: %s\n", repo.Path)

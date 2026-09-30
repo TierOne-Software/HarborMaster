@@ -440,6 +440,23 @@ func TestE2E_Add_InvalidTypeRejected(t *testing.T) {
 	mustRun(t, workDir, "status")
 }
 
+func TestE2E_Add_DerivedName(t *testing.T) {
+	workDir := t.TempDir()
+
+	mustRun(t, workDir, "init")
+
+	// No --name: derived from the URL basename minus the .git suffix.
+	stdout := mustRun(t, workDir, "add", "git@github.com:HPControls/f5-viu-os-base.git")
+	if !strings.Contains(stdout, "Added repository: f5-viu-os-base") {
+		t.Errorf("expected derived name in output, got: %s", stdout)
+	}
+
+	stdout = mustRun(t, workDir, "list", "repos")
+	if !strings.Contains(stdout, "f5-viu-os-base") {
+		t.Errorf("expected derived name in list, got: %s", stdout)
+	}
+}
+
 func TestE2E_Add_WithProject(t *testing.T) {
 	workDir := t.TempDir()
 

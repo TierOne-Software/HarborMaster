@@ -57,7 +57,7 @@ hm add <url> [flags]
 
 | Flag | Description |
 |------|-------------|
-| `-n, --name` | Repository name (required) |
+| `-n, --name` | Repository name (default: derived from the URL) |
 | `--type` | Repository type: `git` or `http` (auto-detected) |
 | `-b, --branch` | Git branch to track |
 | `--tag` | Git tag to track |

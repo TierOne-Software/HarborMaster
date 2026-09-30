@@ -6,6 +6,32 @@ import (
 	"github.com/tierone/harbormaster/pkg/config"
 )
 
+func TestRepoNameFromURL(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{"git@github.com:HPControls/f5-viu-os-base.git", "f5-viu-os-base"},
+		{"git@github.com:org/repo.git", "repo"},
+		{"git@host:repo.git", "repo"}, // SCP-style, no slash after host
+		{"https://github.com/org/repo.git", "repo"},
+		{"https://github.com/org/repo", "repo"},
+		{"https://github.com/org/repo/", "repo"},
+		{"ssh://git@gitlab.com/group/sub/repo.git", "repo"},
+		{"file:///home/mj/src/repo.git", "repo"},
+		{"/home/mj/src/repo", "repo"},
+		{"https://example.com/releases/download/v1/tool.tar.gz", "tool.tar.gz"},
+		{"https://example.com/repo.git?token=abc", "repo"},
+		{"", ""},
+		{"/", ""},
+	}
+	for _, tt := range tests {
+		if got := RepoNameFromURL(tt.url); got != tt.want {
+			t.Errorf("RepoNameFromURL(%q) = %q, want %q", tt.url, got, tt.want)
+		}
+	}
+}
+
 func TestNew(t *testing.T) {
 	tests := []struct {
 		name         string
