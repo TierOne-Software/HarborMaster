@@ -11,7 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
 	"github.com/tierone/harbormaster/pkg/types"
 )
 
@@ -158,7 +158,7 @@ func TestTruncate_RuneSafeAndCellAware(t *testing.T) {
 		if !utf8.ValidString(out) {
 			t.Errorf("truncate(%q, %d) = %q: invalid UTF-8", in, max, out)
 		}
-		if w := runewidth.StringWidth(out); w > max {
+		if w := uniseg.StringWidth(out); w > max {
 			t.Errorf("truncate(%q, %d) is %d cells wide", in, max, w)
 		}
 	}
@@ -171,6 +171,31 @@ func TestTruncate_RuneSafeAndCellAware(t *testing.T) {
 	}
 	if got := truncate("anything", 0); got != "" {
 		t.Errorf("expected empty at width 0, got %q", got)
+	}
+}
+
+// A ZWJ emoji sequence is a single grapheme cluster: truncation must keep
+// the whole cluster or none of it, never cut between the ZWJ and a rune.
+func TestTruncate_GraphemeSafe(t *testing.T) {
+	in := "a👩‍💻bc" // cells: a(1) + cluster(2) + b(1) + c(1)
+
+	if got := truncate(in, 3); got != "a…" {
+		t.Errorf("truncate(%q, 3) = %q, want %q", in, got, "a…")
+	}
+	if got := truncate(in, 4); got != "a👩‍💻…" {
+		t.Errorf("truncate(%q, 4) = %q, want %q", in, got, "a👩‍💻…")
+	}
+
+	// Sweep every width: the result (minus ellipsis) must never end with a
+	// dangling ZWJ or a partial cluster.
+	for max := 1; max <= 6; max++ {
+		out := strings.TrimSuffix(truncate(in, max), "…")
+		if strings.HasSuffix(out, "\u200d") {
+			t.Errorf("truncate(%q, %d) ends with a dangling ZWJ: %q", in, max, out)
+		}
+		if strings.Contains(out, "👩") && !strings.Contains(out, "👩‍💻") {
+			t.Errorf("truncate(%q, %d) split the cluster: %q", in, max, out)
+		}
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
 	"github.com/tierone/harbormaster/pkg/types"
 )
 
@@ -264,14 +264,15 @@ func (m *Model) renderSummary() string {
 }
 
 // truncate shortens s to at most maxCells display cells, appending an
-// ellipsis when truncating. It is rune-safe (never splits a UTF-8 sequence)
-// and width-aware (East Asian wide characters count as two cells), so
-// non-ASCII repository and submodule paths render correctly.
+// ellipsis when truncating. It iterates grapheme clusters, so it never
+// splits a UTF-8 sequence, a ZWJ emoji sequence, or a combining-mark
+// cluster, and wide characters count as two cells — non-ASCII repository
+// and submodule paths render correctly.
 func truncate(s string, maxCells int) string {
 	if maxCells <= 0 {
 		return ""
 	}
-	if runewidth.StringWidth(s) <= maxCells {
+	if uniseg.StringWidth(s) <= maxCells {
 		return s
 	}
 	if maxCells == 1 {
@@ -279,13 +280,14 @@ func truncate(s string, maxCells int) string {
 	}
 	var b strings.Builder
 	w := 0
-	for _, r := range s {
-		rw := runewidth.RuneWidth(r)
-		if w+rw > maxCells-1 { // reserve one cell for the ellipsis
+	g := uniseg.NewGraphemes(s)
+	for g.Next() {
+		cw := g.Width()
+		if w+cw > maxCells-1 { // reserve one cell for the ellipsis
 			break
 		}
-		b.WriteRune(r)
-		w += rw
+		b.WriteString(g.Str())
+		w += cw
 	}
 	return b.String() + "…"
 }
