@@ -8,7 +8,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/rivo/uniseg"
 	"github.com/tierone/harbormaster/pkg/types"
 )
 
@@ -77,6 +80,122 @@ func TestSummarizeOperations(t *testing.T) {
 	}
 	if failed != 3 {
 		t.Errorf("expected 3 failed, got %d", failed)
+	}
+}
+
+func TestModel_RunningOperationShowsMessageNotBar(t *testing.T) {
+	m := NewModel()
+	m.width = 120
+	// A mid-clone update carrying a parsed percentage, as the git
+	// downloader produces for every phase and submodule.
+	m.updateOperation(ProgressMsg(CreateProgressMsgWithPercent(
+		"f5-bbb-os", "url", types.PhaseFetching, 42, "Cloning into 'external/f5-iot-bbb'...",
+	)))
+
+	op := m.operations["f5-bbb-os"]
+	line := m.renderOperation(op)
+
+	if !strings.Contains(line, "Cloning into 'external/f5-iot-bbb'...") {
+		t.Errorf("expected the activity message in the rendered line, got: %q", line)
+	}
+	if !strings.Contains(line, string(types.PhaseFetching)) {
+		t.Errorf("expected the phase label in the rendered line, got: %q", line)
+	}
+	// The bubbles progress bar renders block glyphs; none may appear.
+	if strings.ContainsAny(line, "█░") {
+		t.Errorf("expected no progress bar glyphs, got: %q", line)
+	}
+}
+
+func TestModel_MessageTruncatedToWidth(t *testing.T) {
+	m := NewModel()
+	m.width = 60
+	long := strings.Repeat("x", 200)
+	m.updateOperation(ProgressMsg(CreateProgressMsg("repo", "url", types.PhaseFetching, long)))
+
+	line := m.renderOperation(m.operations["repo"])
+	if strings.Contains(line, long) {
+		t.Error("expected the message to be truncated to the terminal width")
+	}
+	if !strings.Contains(line, "…") {
+		t.Errorf("expected truncation ellipsis, got: %q", line)
+	}
+	if got := lipgloss.Width(line); got > m.width {
+		t.Errorf("rendered line is %d cells, exceeds width %d: %q", got, m.width, line)
+	}
+}
+
+// A narrow terminal that cannot fit even a truncated message fragment must
+// omit the message entirely rather than overflow the width.
+func TestModel_MessageOmittedWhenNoRoom(t *testing.T) {
+	// The rendered prefix (symbol, 30-cell padded name, "initializing"
+	// phase label) is 45 cells; at width 46 there is no room for even a
+	// truncated message fragment.
+	m := NewModel()
+	m.width = 46
+	m.updateOperation(ProgressMsg(CreateProgressMsg(
+		"repo", "url", types.PhaseInit, "Cloning into 'external/foo'...",
+	)))
+
+	line := m.renderOperation(m.operations["repo"])
+	if strings.Contains(line, "Cloning") {
+		t.Errorf("expected message to be omitted in a narrow terminal, got: %q", line)
+	}
+	if got := lipgloss.Width(line); got > m.width {
+		t.Errorf("rendered line is %d cells, exceeds width %d: %q", got, m.width, line)
+	}
+}
+
+func TestTruncate_RuneSafeAndCellAware(t *testing.T) {
+	// Multi-byte runes must never be split: a byte-based cut of this path
+	// at cell 10 would land inside 'é' or '中'.
+	in := "Cloning into 'externel/é中/sub'..."
+	for max := 1; max < len(in); max++ {
+		out := truncate(in, max)
+		if !strings.HasSuffix(out, "…") && out != in {
+			t.Errorf("truncate(%q, %d) = %q: expected ellipsis or passthrough", in, max, out)
+		}
+		if !utf8.ValidString(out) {
+			t.Errorf("truncate(%q, %d) = %q: invalid UTF-8", in, max, out)
+		}
+		if w := uniseg.StringWidth(out); w > max {
+			t.Errorf("truncate(%q, %d) is %d cells wide", in, max, w)
+		}
+	}
+
+	if got := truncate("short", 10); got != "short" {
+		t.Errorf("expected passthrough, got %q", got)
+	}
+	if got := truncate("anything", 1); got != "…" {
+		t.Errorf("expected bare ellipsis at width 1, got %q", got)
+	}
+	if got := truncate("anything", 0); got != "" {
+		t.Errorf("expected empty at width 0, got %q", got)
+	}
+}
+
+// A ZWJ emoji sequence is a single grapheme cluster: truncation must keep
+// the whole cluster or none of it, never cut between the ZWJ and a rune.
+func TestTruncate_GraphemeSafe(t *testing.T) {
+	in := "a👩‍💻bc" // cells: a(1) + cluster(2) + b(1) + c(1)
+
+	if got := truncate(in, 3); got != "a…" {
+		t.Errorf("truncate(%q, 3) = %q, want %q", in, got, "a…")
+	}
+	if got := truncate(in, 4); got != "a👩‍💻…" {
+		t.Errorf("truncate(%q, 4) = %q, want %q", in, got, "a👩‍💻…")
+	}
+
+	// Sweep every width: the result (minus ellipsis) must never end with a
+	// dangling ZWJ or a partial cluster.
+	for max := 1; max <= 6; max++ {
+		out := strings.TrimSuffix(truncate(in, max), "…")
+		if strings.HasSuffix(out, "\u200d") {
+			t.Errorf("truncate(%q, %d) ends with a dangling ZWJ: %q", in, max, out)
+		}
+		if strings.Contains(out, "👩") && !strings.Contains(out, "👩‍💻") {
+			t.Errorf("truncate(%q, %d) split the cluster: %q", in, max, out)
+		}
 	}
 }
 

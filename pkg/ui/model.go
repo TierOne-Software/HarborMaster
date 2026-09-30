@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/rivo/uniseg"
 	"github.com/tierone/harbormaster/pkg/types"
 )
 
@@ -19,7 +19,6 @@ import (
 type operationState struct {
 	repoName  string
 	phase     types.ProgressPhase
-	percent   float64
 	message   string
 	err       error
 	startedAt time.Time
@@ -70,7 +69,6 @@ type Model struct {
 	operations map[string]*operationState
 	order      []string // Maintains insertion order
 	spinner    spinner.Model
-	progress   progress.Model
 	width      int
 	quitting   bool
 	done       bool
@@ -82,17 +80,10 @@ func NewModel() Model {
 	s.Spinner = spinner.Dot
 	s.Style = SpinnerStyle
 
-	p := progress.New(
-		progress.WithDefaultGradient(),
-		progress.WithWidth(40),
-		progress.WithoutPercentage(),
-	)
-
 	return Model{
 		operations: make(map[string]*operationState),
 		order:      []string{},
 		spinner:    s,
-		progress:   p,
 		width:      80,
 	}
 }
@@ -120,10 +111,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
-		m.progress.Width = msg.Width - 50
-		if m.progress.Width < 20 {
-			m.progress.Width = 20
-		}
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -154,7 +141,6 @@ func (m *Model) updateOperation(msg ProgressMsg) {
 	}
 
 	op.phase = msg.Phase
-	op.percent = msg.Percent
 	op.message = msg.Message
 	op.err = msg.Error
 
@@ -226,15 +212,21 @@ func (m *Model) renderOperation(op *operationState) string {
 		b.WriteString(" ")
 		b.WriteString(MutedStyle.Render(fmt.Sprintf("(%s)", op.duration().Round(time.Millisecond))))
 	} else {
-		// Show progress bar or phase
-		if op.percent > 0 {
-			b.WriteString(m.progress.ViewAs(op.percent / 100))
-		} else {
-			phase := PhaseColor(string(op.phase)).Render(string(op.phase))
-			b.WriteString(phase)
-			if op.message != "" {
+		// Running: show the phase and the latest activity message. There is
+		// deliberately no progress bar: for git clones the percentage is
+		// parsed from git's stderr and resets per phase and per submodule,
+		// so a bar claims precision that does not exist. The message (e.g.
+		// "Cloning into 'external/foo'...") is the truthful signal.
+		phase := PhaseColor(string(op.phase)).Render(string(op.phase))
+		b.WriteString(phase)
+		if op.message != "" {
+			// Measure the already-rendered prefix (symbol, padded name,
+			// phase) rather than guessing a constant, and omit the message
+			// entirely when not even a truncated fragment fits.
+			remaining := m.width - lipgloss.Width(b.String()) - 1
+			if remaining >= 2 {
 				b.WriteString(" ")
-				b.WriteString(MutedStyle.Render(op.message))
+				b.WriteString(MutedStyle.Render(truncate(op.message, remaining)))
 			}
 		}
 	}
@@ -271,11 +263,33 @@ func (m *Model) renderSummary() string {
 	return b.String()
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
+// truncate shortens s to at most maxCells display cells, appending an
+// ellipsis when truncating. It iterates grapheme clusters, so it never
+// splits a UTF-8 sequence, a ZWJ emoji sequence, or a combining-mark
+// cluster, and wide characters count as two cells — non-ASCII repository
+// and submodule paths render correctly.
+func truncate(s string, maxCells int) string {
+	if maxCells <= 0 {
+		return ""
+	}
+	if uniseg.StringWidth(s) <= maxCells {
 		return s
 	}
-	return s[:max-3] + "..."
+	if maxCells == 1 {
+		return "…"
+	}
+	var b strings.Builder
+	w := 0
+	g := uniseg.NewGraphemes(s)
+	for g.Next() {
+		cw := g.Width()
+		if w+cw > maxCells-1 { // reserve one cell for the ellipsis
+			break
+		}
+		b.WriteString(g.Str())
+		w += cw
+	}
+	return b.String() + "…"
 }
 
 // SendProgress sends a progress message to the program.

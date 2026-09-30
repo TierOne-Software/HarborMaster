@@ -165,6 +165,22 @@ func shortSHA(sha string) string {
 	return sha
 }
 
+// formatBytes renders a byte count in human-readable form.
+func formatBytes(n int64) string {
+	const (
+		kb = 1024
+		mb = 1024 * kb
+	)
+	switch {
+	case n >= mb:
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(mb))
+	case n >= kb:
+		return fmt.Sprintf("%.0f KB", float64(n)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
 // GetRepoPath returns the full path for a repository.
 func (m *RepositoryManager) GetRepoPath(repo *config.Repository) string {
 	return m.getRepoPath(repo)
@@ -269,9 +285,15 @@ func (m *RepositoryManager) syncRepository(repo *config.Repository) types.Operat
 			if update.BytesTotal > 0 {
 				percent = float64(update.BytesDone) / float64(update.BytesTotal) * 100
 			}
+			message := update.Message
+			if message == "" && update.BytesTotal > 0 {
+				// Byte counters without a message (HTTP downloads): render
+				// the counts as text instead of a progress bar.
+				message = formatBytes(update.BytesDone) + " / " + formatBytes(update.BytesTotal)
+			}
 			m.ui.SendProgress(ui.CreateProgressMsgWithPercent(
 				repo.Name, repo.URL,
-				update.Phase, percent, update.Message,
+				update.Phase, percent, message,
 			))
 		}
 
